@@ -1,0 +1,88 @@
+#!/bin/bash
+# PDANet+ Proxy — routes all TCP traffic through PDANet+ HTTP proxy
+# Uses redsocks to transparently redirect via iptables
+#
+# Usage: pdanet-proxy start|stop|status
+# Requires: redsocks, root (for iptables)
+
+PROXY_IP="192.168.49.1"
+PROXY_PORT="8000"
+LOCAL_PORT="12345"
+CONF="/tmp/redsocks-pdanet.conf"
+PID="/tmp/redsocks-pdanet.pid"
+
+start_proxy() {
+    # Write redsocks config
+    cat > "$CONF" <<EOF
+base {
+    log_debug = off;
+    log_info = off;
+    daemon = on;
+    redirector = iptables;
+}
+redsocks {
+    local_ip = 127.0.0.1;
+    local_port = $LOCAL_PORT;
+    ip = $PROXY_IP;
+    port = $PROXY_PORT;
+    type = http-relay;
+}
+EOF
+
+    # Start redsocks
+    redsocks -c "$CONF" -p "$PID"
+
+    # Create iptables chain
+    iptables -t nat -N REDSOCKS 2>/dev/null
+
+    # Skip local/private addresses (don't proxy LAN traffic)
+    iptables -t nat -A REDSOCKS -d 0.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 169.254.0.0/16 -j RETURN
+    iptables -t nat -A REDSOCKS -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A REDSOCKS -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A REDSOCKS -d 224.0.0.0/4 -j RETURN
+    iptables -t nat -A REDSOCKS -d 240.0.0.0/4 -j RETURN
+
+    # Send everything else to redsocks
+    iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-ports "$LOCAL_PORT"
+
+    # Activate: hook into OUTPUT chain
+    iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
+
+    echo "PDANet+ proxy started ($PROXY_IP:$PROXY_PORT)"
+}
+
+stop_proxy() {
+    # Remove iptables rules
+    iptables -t nat -D OUTPUT -p tcp -j REDSOCKS 2>/dev/null
+    iptables -t nat -F REDSOCKS 2>/dev/null
+    iptables -t nat -X REDSOCKS 2>/dev/null
+
+    # Kill redsocks
+    if [ -f "$PID" ]; then
+        kill "$(cat "$PID")" 2>/dev/null
+        rm -f "$PID"
+    fi
+    rm -f "$CONF"
+
+    echo "PDANet+ proxy stopped"
+}
+
+check_status() {
+    if iptables -t nat -L REDSOCKS >/dev/null 2>&1 && [ -f "$PID" ]; then
+        echo "running"
+        exit 0
+    else
+        echo "stopped"
+        exit 1
+    fi
+}
+
+case "$1" in
+    start)  start_proxy ;;
+    stop)   stop_proxy ;;
+    status) check_status ;;
+    *)      echo "Usage: pdanet-proxy start|stop|status"; exit 1 ;;
+esac
