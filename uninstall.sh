@@ -4,6 +4,8 @@ echo "=== KySettings Uninstaller ==="
 # Remove binaries
 rm -f ~/.local/bin/kysettings
 rm -f ~/.local/bin/pdanet-proxy
+pkill -f minecraft-auto-mute 2>/dev/null || true
+rm -f ~/.local/bin/minecraft-auto-mute.sh
 
 # Remove icon
 rm -f ~/.local/share/icons/hicolor/256x256/apps/kysettings.png

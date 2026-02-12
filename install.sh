@@ -28,6 +28,9 @@ chmod +x ~/.local/bin/kysettings
 cp scripts/pdanet-proxy ~/.local/bin/pdanet-proxy
 chmod +x ~/.local/bin/pdanet-proxy
 
+cp scripts/minecraft-auto-mute ~/.local/bin/minecraft-auto-mute.sh
+chmod +x ~/.local/bin/minecraft-auto-mute.sh
+
 # Install icon
 mkdir -p ~/.local/share/icons/hicolor/256x256/apps
 cp icons/kysettings.png ~/.local/share/icons/hicolor/256x256/apps/kysettings.png

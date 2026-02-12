@@ -1,0 +1,65 @@
+#!/bin/bash
+# Auto-mute Minecraft when window loses focus
+# Uses PipeWire (wpctl) and xdotool for window monitoring
+
+MINECRAFT_MUTED=false
+
+get_minecraft_stream_id() {
+    # Find java/Minecraft stream ID from wpctl
+    wpctl status | grep -A1 "Streams:" | grep -E "^\s+[0-9]+\. java" | awk '{print $1}' | tr -d '.'
+}
+
+mute_minecraft() {
+    local stream_id=$(get_minecraft_stream_id)
+    if [[ -n "$stream_id" && "$MINECRAFT_MUTED" == "false" ]]; then
+        wpctl set-mute "$stream_id" 1
+        MINECRAFT_MUTED=true
+        echo "$(date): Muted Minecraft (stream $stream_id)"
+    fi
+}
+
+unmute_minecraft() {
+    local stream_id=$(get_minecraft_stream_id)
+    if [[ -n "$stream_id" && "$MINECRAFT_MUTED" == "true" ]]; then
+        wpctl set-mute "$stream_id" 0
+        MINECRAFT_MUTED=false
+        echo "$(date): Unmuted Minecraft (stream $stream_id)"
+    fi
+}
+
+is_minecraft_focused() {
+    local active_window=$(xdotool getactivewindow 2>/dev/null)
+    if [[ -z "$active_window" ]]; then
+        return 1
+    fi
+
+    local window_class=$(xprop -id "$active_window" WM_CLASS 2>/dev/null | grep -i minecraft)
+    local window_name=$(xdotool getwindowname "$active_window" 2>/dev/null)
+
+    # Check if window is Minecraft
+    if [[ -n "$window_class" ]] || [[ "$window_name" == *"Minecraft"* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+echo "Minecraft auto-mute started. Press Ctrl+C to stop."
+echo "Monitoring window focus changes..."
+
+# Initial state check
+if is_minecraft_focused; then
+    echo "Minecraft is currently focused"
+    MINECRAFT_MUTED=false
+else
+    echo "Minecraft is not focused - muting"
+    mute_minecraft
+fi
+
+# Monitor focus changes using xprop
+xprop -root -spy _NET_ACTIVE_WINDOW 2>/dev/null | while read -r line; do
+    if is_minecraft_focused; then
+        unmute_minecraft
+    else
+        mute_minecraft
+    fi
+done

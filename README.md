@@ -32,7 +32,7 @@ Or search **"Ky Settings"** in your app launcher.
 **Display**
 - Extended screen blank timeout (up to 4 hours)
 - Pin to dash toggle
-- Minecraft auto-mute (mute when window loses focus)
+- Minecraft auto-mute — automatically mutes the standard Linux Minecraft installation (Java Edition) when the window loses focus
 
 **Wireless**
 - Bluetooth power toggle and adapter reset

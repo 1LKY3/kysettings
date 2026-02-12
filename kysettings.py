@@ -149,11 +149,23 @@ class KySettings(Adw.Application):
         audio_group = Adw.PreferencesGroup()
         audio_group.set_title("Gaming")
 
+        # Minecraft auto-mute install row
+        mc_install_row = Adw.ActionRow()
+        mc_install_row.set_title("Minecraft Auto-Mute Script")
+        mc_install_row.set_subtitle("For standard Minecraft Java Edition on Linux")
+        self.mc_install_btn = Gtk.Button(label="Installed" if self.is_mc_mute_installed() else "Install")
+        self.mc_install_btn.set_valign(Gtk.Align.CENTER)
+        self.mc_install_btn.set_sensitive(not self.is_mc_mute_installed())
+        self.mc_install_btn.connect("clicked", self.on_mc_mute_install)
+        mc_install_row.add_suffix(self.mc_install_btn)
+        audio_group.add(mc_install_row)
+
         # Minecraft auto-mute toggle
         mc_mute_row = Adw.SwitchRow()
         mc_mute_row.set_title("Minecraft Auto-Mute")
-        mc_mute_row.set_subtitle("Mute Minecraft when window loses focus")
+        mc_mute_row.set_subtitle("Mute Minecraft Java Edition when window loses focus")
         mc_mute_row.set_active(self.is_minecraft_mute_running())
+        mc_mute_row.set_sensitive(self.is_mc_mute_installed())
         mc_mute_row.connect("notify::active", self.on_minecraft_mute_toggle)
         audio_group.add(mc_mute_row)
         self.mc_mute_row = mc_mute_row
@@ -190,6 +202,11 @@ class KySettings(Adw.Application):
         except Exception as e:
             print(f"Error toggling pin: {e}")
 
+    def is_mc_mute_installed(self):
+        """Check if minecraft-auto-mute script and deps are installed."""
+        script = os.path.expanduser("~/.local/bin/minecraft-auto-mute.sh")
+        return os.path.exists(script)
+
     def is_minecraft_mute_running(self):
         """Check if minecraft-auto-mute.sh is running."""
         try:
@@ -201,6 +218,92 @@ class KySettings(Adw.Application):
         except:
             return False
 
+    def on_mc_mute_install(self, button):
+        """Install minecraft-auto-mute script and dependencies."""
+        button.set_sensitive(False)
+        button.set_label("Installing...")
+
+        # Install xdotool if missing
+        try:
+            subprocess.run(["which", "xdotool"], check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            subprocess.Popen(
+                ["pkexec", "apt", "install", "-y", "xdotool"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        # Write the script
+        script_path = os.path.expanduser("~/.local/bin/minecraft-auto-mute.sh")
+        os.makedirs(os.path.dirname(script_path), exist_ok=True)
+        script_content = '''#!/bin/bash
+# Auto-mute Minecraft when window loses focus
+# Uses PipeWire (wpctl) and xdotool for window monitoring
+
+MINECRAFT_MUTED=false
+
+get_minecraft_stream_id() {
+    wpctl status | grep -A1 "Streams:" | grep -E "^\\s+[0-9]+\\. java" | awk '{print $1}' | tr -d '.'
+}
+
+mute_minecraft() {
+    local stream_id=$(get_minecraft_stream_id)
+    if [[ -n "$stream_id" && "$MINECRAFT_MUTED" == "false" ]]; then
+        wpctl set-mute "$stream_id" 1
+        MINECRAFT_MUTED=true
+    fi
+}
+
+unmute_minecraft() {
+    local stream_id=$(get_minecraft_stream_id)
+    if [[ -n "$stream_id" && "$MINECRAFT_MUTED" == "true" ]]; then
+        wpctl set-mute "$stream_id" 0
+        MINECRAFT_MUTED=false
+    fi
+}
+
+is_minecraft_focused() {
+    local active_window=$(xdotool getactivewindow 2>/dev/null)
+    if [[ -z "$active_window" ]]; then
+        return 1
+    fi
+    local window_class=$(xprop -id "$active_window" WM_CLASS 2>/dev/null | grep -i minecraft)
+    local window_name=$(xdotool getwindowname "$active_window" 2>/dev/null)
+    if [[ -n "$window_class" ]] || [[ "$window_name" == *"Minecraft"* ]]; then
+        return 0
+    fi
+    return 1
+}
+
+if is_minecraft_focused; then
+    MINECRAFT_MUTED=false
+else
+    mute_minecraft
+fi
+
+xprop -root -spy _NET_ACTIVE_WINDOW 2>/dev/null | while read -r line; do
+    if is_minecraft_focused; then
+        unmute_minecraft
+    else
+        mute_minecraft
+    fi
+done
+'''
+        with open(script_path, 'w') as f:
+            f.write(script_content)
+        os.chmod(script_path, 0o755)
+
+        GLib.timeout_add(3000, self._mc_mute_install_done)
+
+    def _mc_mute_install_done(self):
+        if self.is_mc_mute_installed():
+            self.mc_install_btn.set_label("Installed")
+            self.mc_mute_row.set_sensitive(True)
+        else:
+            self.mc_install_btn.set_label("Install")
+            self.mc_install_btn.set_sensitive(True)
+        return False
+
     def on_minecraft_mute_toggle(self, row, _):
         """Start or stop the Minecraft auto-mute script."""
         if self._initializing:
@@ -208,25 +311,13 @@ class KySettings(Adw.Application):
         script_path = os.path.expanduser("~/.local/bin/minecraft-auto-mute.sh")
 
         if row.get_active():
-            # Start the script
-            if os.path.exists(script_path):
-                subprocess.Popen(
-                    [script_path],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True
-                )
-            else:
-                row.set_active(False)
-                dialog = Adw.MessageDialog(
-                    transient_for=self.win,
-                    heading="Script Not Found",
-                    body=f"Minecraft auto-mute script not found at:\n{script_path}"
-                )
-                dialog.add_response("ok", "OK")
-                dialog.present()
+            subprocess.Popen(
+                [script_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
         else:
-            # Stop the script
             subprocess.run(["pkill", "-f", "minecraft-auto-mute"], capture_output=True)
 
     def add_wireless_page(self):
