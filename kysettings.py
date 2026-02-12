@@ -7,7 +7,10 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, Gio, GLib
 import subprocess
 import os
+import pathlib
 from datetime import datetime, timedelta
+
+FIRST_RUN_FLAG = pathlib.Path.home() / ".config" / "kysettings" / ".installed"
 
 # Custom keybinding paths
 KEYBINDING_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings"
@@ -60,6 +63,24 @@ class KySettings(Adw.Application):
         box.append(self.stack)
         self.win.set_content(box)
         self.win.present()
+
+        if not FIRST_RUN_FLAG.exists():
+            self.show_welcome()
+            FIRST_RUN_FLAG.parent.mkdir(parents=True, exist_ok=True)
+            FIRST_RUN_FLAG.touch()
+
+    def show_welcome(self):
+        dialog = Adw.MessageDialog(
+            transient_for=self.win,
+            heading="Welcome to Ky Settings",
+            body=(
+                "Ky Settings has been pinned to your dash.\n\n"
+                "To remove it, open the Display page and toggle "
+                "\"Pin to Dash\" off."
+            ),
+        )
+        dialog.add_response("ok", "Got it")
+        dialog.present()
 
     def add_display_page(self):
         page = Adw.PreferencesPage()

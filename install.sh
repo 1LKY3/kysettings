@@ -32,10 +32,15 @@ chmod +x ~/.local/bin/pdanet-proxy
 cp kysettings.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
 
+# Pin to dash
+FAVORITES=$(gsettings get org.gnome.shell favorite-apps 2>/dev/null || echo "[]")
+if [[ "$FAVORITES" != *"kysettings.desktop"* ]]; then
+    NEW=$(echo "$FAVORITES" | sed "s/]/, 'kysettings.desktop']/" | sed "s/\[, /[/")
+    gsettings set org.gnome.shell favorite-apps "$NEW" 2>/dev/null || true
+fi
+
 echo ""
 echo "Installed successfully!"
-echo "  - kysettings        -> ~/.local/bin/kysettings"
-echo "  - pdanet-proxy      -> ~/.local/bin/pdanet-proxy"
-echo "  - kysettings.desktop -> ~/.local/share/applications/"
-echo ""
-echo "Search 'Ky Settings' in your app launcher."
+
+# Launch the app
+kysettings &
