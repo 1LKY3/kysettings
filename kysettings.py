@@ -35,6 +35,8 @@ class KySettings(Adw.Application):
         self.alarm_enabled = False
         self.alarm_timer_id = None
 
+        self._initializing = True
+
     def on_activate(self, app):
         self.win = Adw.ApplicationWindow(application=app)
         self.win.set_title("Ky Settings")
@@ -53,6 +55,8 @@ class KySettings(Adw.Application):
         self.add_wireless_page()
         self.add_keyboard_page()
         self.add_timers_page()
+
+        self._initializing = False
 
         # Switcher in header if multiple pages
         switcher = Adw.ViewSwitcher()
@@ -169,6 +173,8 @@ class KySettings(Adw.Application):
 
     def on_pin_toggle(self, row, _):
         """Add or remove app from GNOME dash favorites."""
+        if self._initializing:
+            return
         try:
             settings = Gio.Settings.new("org.gnome.shell")
             favorites = list(settings.get_strv("favorite-apps"))
@@ -197,6 +203,8 @@ class KySettings(Adw.Application):
 
     def on_minecraft_mute_toggle(self, row, _):
         """Start or stop the Minecraft auto-mute script."""
+        if self._initializing:
+            return
         script_path = os.path.expanduser("~/.local/bin/minecraft-auto-mute.sh")
 
         if row.get_active():
@@ -291,6 +299,8 @@ class KySettings(Adw.Application):
 
     def on_bluetooth_power_toggle(self, row, _):
         """Toggle Bluetooth adapter power."""
+        if self._initializing:
+            return
         state = "on" if row.get_active() else "off"
         subprocess.run(
             ["bluetoothctl", "power", state],
@@ -363,6 +373,8 @@ class KySettings(Adw.Application):
 
     def on_pdanet_proxy_toggle(self, row, _):
         """Start or stop the PDANet+ transparent proxy."""
+        if self._initializing:
+            return
         if row.get_active():
             subprocess.Popen(
                 ["pkexec", os.path.expanduser("~/.local/bin/pdanet-proxy"), "start"],
