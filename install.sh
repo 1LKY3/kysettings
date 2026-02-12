@@ -40,18 +40,8 @@ gtk-update-icon-cache ~/.local/share/icons/hicolor/ 2>/dev/null || true
 cp kysettings.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
 
-# Pin to dash
-python3 -c "
-import subprocess, ast
-out = subprocess.run(['gsettings', 'get', 'org.gnome.shell', 'favorite-apps'], capture_output=True, text=True)
-favs = ast.literal_eval(out.stdout.strip()) if out.returncode == 0 else []
-if 'kysettings.desktop' not in favs:
-    favs.append('kysettings.desktop')
-    subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'favorite-apps', str(favs)])
-" 2>/dev/null || true
-
 echo ""
 echo "Installed successfully!"
 
-# Launch the app
+# Launch the app (handles dash pinning on first run)
 kysettings &

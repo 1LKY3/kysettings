@@ -69,9 +69,21 @@ class KySettings(Adw.Application):
         self.win.present()
 
         if not FIRST_RUN_FLAG.exists():
+            self.pin_to_dash()
             self.show_welcome()
             FIRST_RUN_FLAG.parent.mkdir(parents=True, exist_ok=True)
             FIRST_RUN_FLAG.touch()
+
+    def pin_to_dash(self):
+        """Pin app to GNOME dash on first run."""
+        try:
+            settings = Gio.Settings.new("org.gnome.shell")
+            favorites = list(settings.get_strv("favorite-apps"))
+            if "kysettings.desktop" not in favorites:
+                favorites.append("kysettings.desktop")
+                settings.set_strv("favorite-apps", favorites)
+        except Exception as e:
+            print(f"Could not pin to dash: {e}")
 
     def show_welcome(self):
         dialog = Adw.MessageDialog(
