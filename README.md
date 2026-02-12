@@ -12,6 +12,15 @@ cd kysettings
 
 The installer checks for dependencies (`python3-gi`, `gir1.2-adw-1`) and installs them if missing.
 
+## Usage
+
+Run from terminal:
+```bash
+kysettings
+```
+
+Or search **"Ky Settings"** in your app launcher.
+
 ## Uninstall
 
 ```bash
