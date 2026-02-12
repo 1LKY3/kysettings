@@ -5,6 +5,10 @@ echo "=== KySettings Uninstaller ==="
 rm -f ~/.local/bin/kysettings
 rm -f ~/.local/bin/pdanet-proxy
 
+# Remove icon
+rm -f ~/.local/share/icons/hicolor/256x256/apps/kysettings.png
+gtk-update-icon-cache ~/.local/share/icons/hicolor/ 2>/dev/null || true
+
 # Remove desktop entry
 rm -f ~/.local/share/applications/kysettings.desktop
 update-desktop-database ~/.local/share/applications/ 2>/dev/null || true

@@ -2,7 +2,8 @@
 Name=Ky Settings
 Comment=Custom system settings
 Exec=kysettings
-Icon=preferences-system
+Icon=kysettings
+StartupWMClass=com.ky.settings
 Terminal=false
 Type=Application
 Categories=Settings;System;

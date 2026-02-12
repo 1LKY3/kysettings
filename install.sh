@@ -28,6 +28,11 @@ chmod +x ~/.local/bin/kysettings
 cp scripts/pdanet-proxy ~/.local/bin/pdanet-proxy
 chmod +x ~/.local/bin/pdanet-proxy
 
+# Install icon
+mkdir -p ~/.local/share/icons/hicolor/256x256/apps
+cp icons/kysettings.png ~/.local/share/icons/hicolor/256x256/apps/kysettings.png
+gtk-update-icon-cache ~/.local/share/icons/hicolor/ 2>/dev/null || true
+
 # Install desktop entry
 cp kysettings.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
