@@ -33,11 +33,11 @@ chmod +x ~/.local/bin/minecraft-auto-mute.sh
 
 # Install icon
 mkdir -p ~/.local/share/icons/hicolor/256x256/apps
-cp icons/kysettings.png ~/.local/share/icons/hicolor/256x256/apps/kysettings.png
+cp icons/com.ky.settings.png ~/.local/share/icons/hicolor/256x256/apps/com.ky.settings.png
 gtk-update-icon-cache ~/.local/share/icons/hicolor/ 2>/dev/null || true
 
 # Install desktop entry
-cp kysettings.desktop ~/.local/share/applications/
+cp com.ky.settings.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
 
 echo ""

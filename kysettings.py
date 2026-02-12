@@ -79,8 +79,8 @@ class KySettings(Adw.Application):
         try:
             settings = Gio.Settings.new("org.gnome.shell")
             favorites = list(settings.get_strv("favorite-apps"))
-            if "kysettings.desktop" not in favorites:
-                favorites.append("kysettings.desktop")
+            if "com.ky.settings.desktop" not in favorites:
+                favorites.append("com.ky.settings.desktop")
                 settings.set_strv("favorite-apps", favorites)
         except Exception as e:
             print(f"Could not pin to dash: {e}")
@@ -191,7 +191,7 @@ class KySettings(Adw.Application):
         try:
             settings = Gio.Settings.new("org.gnome.shell")
             favorites = settings.get_strv("favorite-apps")
-            return "kysettings.desktop" in favorites
+            return "com.ky.settings.desktop" in favorites
         except:
             return False
 
@@ -204,11 +204,11 @@ class KySettings(Adw.Application):
             favorites = list(settings.get_strv("favorite-apps"))
 
             if row.get_active():
-                if "kysettings.desktop" not in favorites:
-                    favorites.append("kysettings.desktop")
+                if "com.ky.settings.desktop" not in favorites:
+                    favorites.append("com.ky.settings.desktop")
             else:
-                if "kysettings.desktop" in favorites:
-                    favorites.remove("kysettings.desktop")
+                if "com.ky.settings.desktop" in favorites:
+                    favorites.remove("com.ky.settings.desktop")
 
             settings.set_strv("favorite-apps", favorites)
         except Exception as e:
