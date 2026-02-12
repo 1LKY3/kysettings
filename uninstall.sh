@@ -19,11 +19,14 @@ update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
 rm -rf ~/.config/kysettings
 
 # Unpin from dash
-FAVORITES=$(gsettings get org.gnome.shell favorite-apps 2>/dev/null || echo "[]")
-if [[ "$FAVORITES" == *"kysettings.desktop"* ]]; then
-    NEW=$(echo "$FAVORITES" | sed "s/, 'kysettings.desktop'//" | sed "s/'kysettings.desktop', //" | sed "s/'kysettings.desktop'//")
-    gsettings set org.gnome.shell favorite-apps "$NEW" 2>/dev/null || true
-fi
+python3 -c "
+import subprocess, ast
+out = subprocess.run(['gsettings', 'get', 'org.gnome.shell', 'favorite-apps'], capture_output=True, text=True)
+favs = ast.literal_eval(out.stdout.strip()) if out.returncode == 0 else []
+if 'kysettings.desktop' in favs:
+    favs.remove('kysettings.desktop')
+    subprocess.run(['gsettings', 'set', 'org.gnome.shell', 'favorite-apps', str(favs)])
+" 2>/dev/null || true
 
 echo ""
 echo "KySettings has been completely removed."
