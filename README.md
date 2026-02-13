@@ -40,6 +40,7 @@ Or search **"Ky Settings"** in your app launcher.
 
 **Keyboard**
 - Type Date shortcut (Ctrl+Alt+. inserts current date/time)
+- Speech to Text (Super+H) — dictate into any window using Speech Note (offline, installed via Flatpak)
 
 **Timers**
 - Alarm clock

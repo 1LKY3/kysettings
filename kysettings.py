@@ -517,6 +517,34 @@ done
         group.add(row)
         page.add(group)
 
+        # Speech to Text group
+        stt_group = Adw.PreferencesGroup()
+        stt_group.set_title("Speech to Text")
+        stt_group.set_description("Dictate into any window using Speech Note")
+
+        # Install row
+        stt_install_row = Adw.ActionRow()
+        stt_install_row.set_title("Speech Note")
+        stt_install_row.set_subtitle("Offline speech-to-text engine (Flatpak)")
+        self.stt_install_btn = Gtk.Button(label="Installed" if self.is_speech_note_installed() else "Install")
+        self.stt_install_btn.set_valign(Gtk.Align.CENTER)
+        self.stt_install_btn.set_sensitive(not self.is_speech_note_installed())
+        self.stt_install_btn.connect("clicked", self.on_speech_note_install)
+        stt_install_row.add_suffix(self.stt_install_btn)
+        stt_group.add(stt_install_row)
+
+        # Super+H keybinding toggle
+        stt_hotkey_row = Adw.SwitchRow()
+        stt_hotkey_row.set_title("Super + H Dictation")
+        stt_hotkey_row.set_subtitle("Press Super+H to start speech-to-text in active window")
+        stt_hotkey_row.set_active(self.has_keybinding("ky-speech-to-text"))
+        stt_hotkey_row.set_sensitive(self.is_speech_note_installed())
+        stt_hotkey_row.connect("notify::active", self.on_speech_hotkey_toggle)
+        stt_group.add(stt_hotkey_row)
+        self.stt_hotkey_row = stt_hotkey_row
+
+        page.add(stt_group)
+
         self.stack.add_titled(page, "keyboard", "Keyboard")
 
     def add_timers_page(self):
@@ -846,5 +874,64 @@ done
             )
         else:
             self.remove_keybinding("ky-insert-date")
+
+    # === SPEECH TO TEXT FUNCTIONS ===
+    def is_speech_note_installed(self):
+        """Check if Speech Note is installed via Flatpak."""
+        try:
+            result = subprocess.run(
+                ["flatpak", "list", "--app", "--columns=application"],
+                capture_output=True, text=True, timeout=5
+            )
+            return "net.mkiol.SpeechNote" in result.stdout
+        except:
+            return False
+
+    def on_speech_note_install(self, button):
+        """Install Speech Note via Flatpak."""
+        button.set_sensitive(False)
+        button.set_label("Installing...")
+        subprocess.Popen(
+            ["flatpak", "install", "-y", "flathub", "net.mkiol.SpeechNote"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        GLib.timeout_add(30000, self._speech_note_install_done)
+
+    def _speech_note_install_done(self):
+        if self.is_speech_note_installed():
+            self.stt_install_btn.set_label("Installed")
+            self.stt_hotkey_row.set_sensitive(True)
+        else:
+            self.stt_install_btn.set_label("Install")
+            self.stt_install_btn.set_sensitive(True)
+        return False
+
+    def on_speech_hotkey_toggle(self, row, _):
+        """Toggle Super+H speech-to-text keybinding."""
+        if self._initializing:
+            return
+        if row.get_active():
+            # Unbind GNOME's default Super+H (minimize window)
+            wm_keys = Gio.Settings.new("org.gnome.desktop.wm.keybindings")
+            minimize = list(wm_keys.get_strv("minimize"))
+            if "<Super>h" in minimize:
+                minimize.remove("<Super>h")
+                wm_keys.set_strv("minimize", minimize)
+
+            self.add_keybinding(
+                "ky-speech-to-text",
+                "flatpak run net.mkiol.SpeechNote --action start-listening-active-window",
+                "<Super>h"
+            )
+        else:
+            self.remove_keybinding("ky-speech-to-text")
+
+            # Restore GNOME's default Super+H minimize
+            wm_keys = Gio.Settings.new("org.gnome.desktop.wm.keybindings")
+            minimize = list(wm_keys.get_strv("minimize"))
+            if "<Super>h" not in minimize:
+                minimize.append("<Super>h")
+                wm_keys.set_strv("minimize", minimize)
 
 KySettings().run(None)
