@@ -34,6 +34,27 @@ def check_deps():
         sys.exit(1)
 
 
+def get_speech_note_state():
+    """Get Speech Note task state via D-Bus. Returns int or None."""
+    try:
+        result = subprocess.run(
+            ["dbus-send", "--session", "--print-reply",
+             "--dest=net.mkiol.SpeechNote",
+             "/net/mkiol/SpeechNote",
+             "org.freedesktop.DBus.Properties.Get",
+             "string:net.mkiol.SpeechNote", "string:TaskState"],
+            capture_output=True, text=True, timeout=2
+        )
+        # Parse "int32 N" from output
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("int32"):
+                return int(line.split()[-1])
+    except Exception:
+        pass
+    return None
+
+
 def get_clipboard():
     """Read current clipboard contents."""
     try:
@@ -128,6 +149,8 @@ def main():
 
     # Snapshot current clipboard so we don't paste existing content
     last_clipboard = get_clipboard()
+    last_state = get_speech_note_state()
+    was_active = False  # Track if Speech Note was recently listening/processing
 
     def handle_sigint(sig, frame):
         print("\nSpeech Lock stopped.")
@@ -137,16 +160,28 @@ def main():
 
     while True:
         time.sleep(0.3)
+
+        # Track Speech Note state: idle=1, anything else=active
+        state = get_speech_note_state()
+        if state is not None and state != 1:
+            was_active = True
+
         current = get_clipboard()
 
         if current != last_clipboard and current.strip():
-            # Send keys directly to target window — no focus change
-            paste_to_window(target_wid, target_is_term)
-            time.sleep(0.2)
-            send_enter(target_wid)
+            if was_active:
+                # Speech Note just produced output — paste it
+                paste_to_window(target_wid, target_is_term)
+                time.sleep(0.2)
+                send_enter(target_wid)
 
-            preview = current.strip()[:60]
-            print(f"  Pasted: {preview}")
+                preview = current.strip()[:60]
+                print(f"  Pasted: {preview}")
+                was_active = False
+            else:
+                # Clipboard changed but NOT from Speech Note — skip
+                print(f"  Skipped (not from Speech Note): {current.strip()[:40]}")
+
             last_clipboard = current
 
 
