@@ -31,6 +31,9 @@ chmod +x ~/.local/bin/pdanet-proxy
 cp scripts/minecraft-auto-mute ~/.local/bin/minecraft-auto-mute.sh
 chmod +x ~/.local/bin/minecraft-auto-mute.sh
 
+cp scripts/speech-lock ~/.local/bin/speech-lock
+chmod +x ~/.local/bin/speech-lock
+
 # Install icon
 mkdir -p ~/.local/share/icons/hicolor/256x256/apps
 cp icons/com.ky.settings.png ~/.local/share/icons/hicolor/256x256/apps/com.ky.settings.png

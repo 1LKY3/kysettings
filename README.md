@@ -40,7 +40,8 @@ Or search **"Ky Settings"** in your app launcher.
 
 **Keyboard**
 - Type Date shortcut (Ctrl+Alt+. inserts current date/time)
-- Speech to Text (Super+H) — dictate into any window using Speech Note (offline, installed via Flatpak)
+- Speech to Text — install Speech Note (offline, via Flatpak)
+- Speech Lock — lock dictation to a specific window. Opens a terminal, click your target window, then dictate in Speech Note (clipboard mode). Text auto-pastes into the locked window no matter what's focused. X11 only.
 
 **Timers**
 - Alarm clock

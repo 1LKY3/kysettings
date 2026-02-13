@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Speech Lock — Lock Speech Note dictation to a specific window.
+
+Monitors the clipboard for changes from Speech Note (clipboard mode)
+and automatically pastes into a locked target window, no matter what
+window is currently focused.
+
+Usage:
+    1. Run this script
+    2. Click on the window you want speech text to go to
+    3. In Speech Note, use "Listen" with clipboard mode
+    4. Dictated text auto-pastes into your locked window
+    5. Press Ctrl+C to stop
+
+Requires: xdotool, xclip (X11 only)
+"""
+
+import subprocess
+import sys
+import os
+import time
+import signal
+
+
+def check_deps():
+    """Verify required tools are installed."""
+    missing = []
+    for cmd in ["xdotool", "xclip"]:
+        if subprocess.run(["which", cmd], capture_output=True).returncode != 0:
+            missing.append(cmd)
+    if missing:
+        print(f"Missing: {', '.join(missing)}")
+        print(f"Install with: sudo apt install {' '.join(missing)}")
+        sys.exit(1)
+
+
+def get_clipboard():
+    """Read current clipboard contents."""
+    try:
+        result = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-o"],
+            capture_output=True, text=True, timeout=2
+        )
+        return result.stdout
+    except Exception:
+        return ""
+
+
+def focus_window(wid):
+    """Activate a window by ID."""
+    subprocess.run(
+        ["xdotool", "windowactivate", "--sync", str(wid)],
+        capture_output=True, timeout=3
+    )
+
+
+def paste():
+    """Send Ctrl+V to the focused window."""
+    subprocess.run(["xdotool", "key", "ctrl+v"], capture_output=True, timeout=2)
+
+
+def main():
+    check_deps()
+
+    print("Speech Lock")
+    print("=" * 40)
+    print()
+    print("Click the window you want to lock...")
+    print()
+
+    # Let user click a window
+    result = subprocess.run(
+        ["xdotool", "selectwindow"],
+        capture_output=True, text=True
+    )
+    target_wid = result.stdout.strip()
+
+    if not target_wid:
+        print("No window selected. Exiting.")
+        sys.exit(1)
+
+    # Get window name for display
+    name_result = subprocess.run(
+        ["xdotool", "getwindowname", target_wid],
+        capture_output=True, text=True
+    )
+    window_name = name_result.stdout.strip()
+
+    print(f"Locked to: {window_name}")
+    print()
+    print("Use Speech Note in clipboard mode.")
+    print("Dictated text will auto-paste into the locked window.")
+    print("Press Ctrl+C to stop.")
+    print()
+
+    # Snapshot current clipboard so we don't paste existing content
+    last_clipboard = get_clipboard()
+
+    def handle_sigint(sig, frame):
+        print("\nSpeech Lock stopped.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    while True:
+        time.sleep(0.3)
+        current = get_clipboard()
+
+        if current != last_clipboard and current.strip():
+            # Save currently focused window
+            try:
+                active = subprocess.run(
+                    ["xdotool", "getactivewindow"],
+                    capture_output=True, text=True, timeout=2
+                )
+                active_wid = active.stdout.strip()
+            except Exception:
+                active_wid = None
+
+            # Focus target window, paste, refocus
+            focus_window(target_wid)
+            time.sleep(0.15)
+            paste()
+            time.sleep(0.15)
+
+            if active_wid and active_wid != target_wid:
+                focus_window(active_wid)
+
+            preview = current.strip()[:60]
+            print(f"  Pasted: {preview}")
+            last_clipboard = current
+
+
+if __name__ == "__main__":
+    main()

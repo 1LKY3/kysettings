@@ -6,6 +6,8 @@ rm -f ~/.local/bin/kysettings
 rm -f ~/.local/bin/pdanet-proxy
 pkill -f minecraft-auto-mute 2>/dev/null || true
 rm -f ~/.local/bin/minecraft-auto-mute.sh
+pkill -f speech-lock 2>/dev/null || true
+rm -f ~/.local/bin/speech-lock
 
 # Remove icon
 rm -f ~/.local/share/icons/hicolor/256x256/apps/com.ky.settings.png

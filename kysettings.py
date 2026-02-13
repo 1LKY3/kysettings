@@ -533,15 +533,32 @@ done
         stt_install_row.add_suffix(self.stt_install_btn)
         stt_group.add(stt_install_row)
 
-        # Super+H keybinding toggle
-        stt_hotkey_row = Adw.SwitchRow()
-        stt_hotkey_row.set_title("Super + H Dictation")
-        stt_hotkey_row.set_subtitle("Press Super+H to start speech-to-text in active window")
-        stt_hotkey_row.set_active(self.has_keybinding("ky-speech-to-text"))
-        stt_hotkey_row.set_sensitive(self.is_speech_note_installed())
-        stt_hotkey_row.connect("notify::active", self.on_speech_hotkey_toggle)
-        stt_group.add(stt_hotkey_row)
-        self.stt_hotkey_row = stt_hotkey_row
+        # Speech Lock install row
+        sl_install_row = Adw.ActionRow()
+        sl_install_row.set_title("Speech Lock Script")
+        sl_install_row.set_subtitle("Locks dictation to one window (requires xdotool, xclip)")
+        self.sl_install_btn = Gtk.Button(label="Installed" if self.is_speech_lock_installed() else "Install")
+        self.sl_install_btn.set_valign(Gtk.Align.CENTER)
+        self.sl_install_btn.set_sensitive(not self.is_speech_lock_installed())
+        self.sl_install_btn.connect("clicked", self.on_speech_lock_install)
+        sl_install_row.add_suffix(self.sl_install_btn)
+        stt_group.add(sl_install_row)
+
+        # Speech Lock run button
+        sl_run_row = Adw.ActionRow()
+        sl_run_row.set_title("Run Speech Lock")
+        sl_run_row.set_subtitle(
+            "Opens a terminal. Click target window, then dictate "
+            "in Speech Note (clipboard mode). Text auto-pastes into "
+            "the locked window. X11 only."
+        )
+        self.sl_run_btn = Gtk.Button(label="Run")
+        self.sl_run_btn.set_valign(Gtk.Align.CENTER)
+        self.sl_run_btn.set_sensitive(self.is_speech_lock_installed())
+        self.sl_run_btn.connect("clicked", self.on_speech_lock_run)
+        sl_run_row.add_suffix(self.sl_run_btn)
+        stt_group.add(sl_run_row)
+        self.sl_run_row = sl_run_row
 
         page.add(stt_group)
 
@@ -901,37 +918,62 @@ done
     def _speech_note_install_done(self):
         if self.is_speech_note_installed():
             self.stt_install_btn.set_label("Installed")
-            self.stt_hotkey_row.set_sensitive(True)
         else:
             self.stt_install_btn.set_label("Install")
             self.stt_install_btn.set_sensitive(True)
         return False
 
-    def on_speech_hotkey_toggle(self, row, _):
-        """Toggle Super+H speech-to-text keybinding."""
-        if self._initializing:
-            return
-        if row.get_active():
-            # Unbind GNOME's default Super+H (minimize window)
-            wm_keys = Gio.Settings.new("org.gnome.desktop.wm.keybindings")
-            minimize = list(wm_keys.get_strv("minimize"))
-            if "<Super>h" in minimize:
-                minimize.remove("<Super>h")
-                wm_keys.set_strv("minimize", minimize)
+    # === SPEECH LOCK FUNCTIONS ===
+    def is_speech_lock_installed(self):
+        """Check if speech-lock script and deps are installed."""
+        script = os.path.expanduser("~/.local/bin/speech-lock")
+        return os.path.exists(script)
 
-            self.add_keybinding(
-                "ky-speech-to-text",
-                "flatpak run net.mkiol.SpeechNote --action start-listening-active-window",
-                "<Super>h"
+    def on_speech_lock_install(self, button):
+        """Install speech-lock script and dependencies (xdotool, xclip)."""
+        button.set_sensitive(False)
+        button.set_label("Installing...")
+
+        # Install xdotool and xclip if missing
+        deps_needed = []
+        for cmd in ["xdotool", "xclip"]:
+            if subprocess.run(["which", cmd], capture_output=True).returncode != 0:
+                deps_needed.append(cmd)
+        if deps_needed:
+            subprocess.Popen(
+                ["pkexec", "apt", "install", "-y"] + deps_needed,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-        else:
-            self.remove_keybinding("ky-speech-to-text")
 
-            # Restore GNOME's default Super+H minimize
-            wm_keys = Gio.Settings.new("org.gnome.desktop.wm.keybindings")
-            minimize = list(wm_keys.get_strv("minimize"))
-            if "<Super>h" not in minimize:
-                minimize.append("<Super>h")
-                wm_keys.set_strv("minimize", minimize)
+        # Copy the script
+        script_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "speech-lock")
+        script_dst = os.path.expanduser("~/.local/bin/speech-lock")
+        os.makedirs(os.path.dirname(script_dst), exist_ok=True)
+
+        if os.path.exists(script_src):
+            import shutil
+            shutil.copy2(script_src, script_dst)
+            os.chmod(script_dst, 0o755)
+
+        GLib.timeout_add(5000, self._speech_lock_install_done)
+
+    def _speech_lock_install_done(self):
+        if self.is_speech_lock_installed():
+            self.sl_install_btn.set_label("Installed")
+            self.sl_run_btn.set_sensitive(True)
+        else:
+            self.sl_install_btn.set_label("Install")
+            self.sl_install_btn.set_sensitive(True)
+        return False
+
+    def on_speech_lock_run(self, button):
+        """Launch speech-lock in a terminal window."""
+        script = os.path.expanduser("~/.local/bin/speech-lock")
+        subprocess.Popen(
+            ["gnome-terminal", "--title=Speech Lock", "--", "python3", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 KySettings().run(None)
