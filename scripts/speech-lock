@@ -54,9 +54,32 @@ def focus_window(wid):
     )
 
 
-def paste():
-    """Send Ctrl+V to the focused window."""
-    subprocess.run(["xdotool", "key", "ctrl+v"], capture_output=True, timeout=2)
+def is_terminal(wid):
+    """Check if a window is a terminal emulator."""
+    try:
+        result = subprocess.run(
+            ["xprop", "-id", str(wid), "WM_CLASS"],
+            capture_output=True, text=True, timeout=2
+        )
+        wm_class = result.stdout.lower()
+        terminals = ["gnome-terminal", "terminator", "xterm", "konsole",
+                      "tilix", "alacritty", "kitty", "xfce4-terminal"]
+        return any(t in wm_class for t in terminals)
+    except Exception:
+        return False
+
+
+def paste_to_window(wid, is_term):
+    """Paste clipboard into window. Terminals use Ctrl+Shift+V."""
+    if is_term:
+        subprocess.run(["xdotool", "key", "ctrl+shift+v"], capture_output=True, timeout=2)
+    else:
+        subprocess.run(["xdotool", "key", "ctrl+v"], capture_output=True, timeout=2)
+
+
+def send_enter(wid):
+    """Press Enter in the focused window."""
+    subprocess.run(["xdotool", "key", "Return"], capture_output=True, timeout=2)
 
 
 def main():
@@ -86,10 +109,17 @@ def main():
     )
     window_name = name_result.stdout.strip()
 
-    print(f"Locked to: {window_name}")
+    target_is_term = is_terminal(target_wid)
+    window_type = "terminal" if target_is_term else "window"
+
+    print(f"Locked to: {window_name} ({window_type})")
+    if target_is_term:
+        print("  Paste: Ctrl+Shift+V  |  Auto-submit: Enter")
+    else:
+        print("  Paste: Ctrl+V")
     print()
     print("Use Speech Note in clipboard mode.")
-    print("Dictated text will auto-paste into the locked window.")
+    print("Dictated text will auto-paste + submit into the locked window.")
     print("Press Ctrl+C to stop.")
     print()
 
@@ -117,10 +147,12 @@ def main():
             except Exception:
                 active_wid = None
 
-            # Focus target window, paste, refocus
+            # Focus target window, paste, send enter, refocus
             focus_window(target_wid)
             time.sleep(0.15)
-            paste()
+            paste_to_window(target_wid, target_is_term)
+            time.sleep(0.2)
+            send_enter(target_wid)
             time.sleep(0.15)
 
             if active_wid and active_wid != target_wid:
