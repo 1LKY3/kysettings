@@ -70,16 +70,19 @@ def is_terminal(wid):
 
 
 def paste_to_window(wid, is_term):
-    """Paste clipboard into window. Terminals use Ctrl+Shift+V."""
+    """Paste clipboard into window without stealing focus."""
     if is_term:
-        subprocess.run(["xdotool", "key", "ctrl+shift+v"], capture_output=True, timeout=2)
+        subprocess.run(["xdotool", "key", "--window", str(wid), "ctrl+shift+v"],
+                        capture_output=True, timeout=2)
     else:
-        subprocess.run(["xdotool", "key", "ctrl+v"], capture_output=True, timeout=2)
+        subprocess.run(["xdotool", "key", "--window", str(wid), "ctrl+v"],
+                        capture_output=True, timeout=2)
 
 
 def send_enter(wid):
-    """Press Enter in the focused window."""
-    subprocess.run(["xdotool", "key", "Return"], capture_output=True, timeout=2)
+    """Press Enter in window without stealing focus."""
+    subprocess.run(["xdotool", "key", "--window", str(wid), "Return"],
+                    capture_output=True, timeout=2)
 
 
 def main():
@@ -137,26 +140,10 @@ def main():
         current = get_clipboard()
 
         if current != last_clipboard and current.strip():
-            # Save currently focused window
-            try:
-                active = subprocess.run(
-                    ["xdotool", "getactivewindow"],
-                    capture_output=True, text=True, timeout=2
-                )
-                active_wid = active.stdout.strip()
-            except Exception:
-                active_wid = None
-
-            # Focus target window, paste, send enter, refocus
-            focus_window(target_wid)
-            time.sleep(0.15)
+            # Send keys directly to target window — no focus change
             paste_to_window(target_wid, target_is_term)
             time.sleep(0.2)
             send_enter(target_wid)
-            time.sleep(0.15)
-
-            if active_wid and active_wid != target_wid:
-                focus_window(active_wid)
 
             preview = current.strip()[:60]
             print(f"  Pasted: {preview}")
