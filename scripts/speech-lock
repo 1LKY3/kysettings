@@ -17,7 +17,6 @@ Requires: xdotool, xclip (X11 only)
 
 import subprocess
 import sys
-import os
 import time
 import signal
 
@@ -46,14 +45,6 @@ def get_clipboard():
         return ""
 
 
-def focus_window(wid):
-    """Activate a window by ID."""
-    subprocess.run(
-        ["xdotool", "windowactivate", "--sync", str(wid)],
-        capture_output=True, timeout=3
-    )
-
-
 def is_terminal(wid):
     """Check if a window is a terminal emulator."""
     try:
@@ -67,22 +58,6 @@ def is_terminal(wid):
         return any(t in wm_class for t in terminals)
     except Exception:
         return False
-
-
-def paste_to_window(wid, is_term):
-    """Paste clipboard into window without stealing focus."""
-    if is_term:
-        subprocess.run(["xdotool", "key", "--window", str(wid), "ctrl+shift+v"],
-                        capture_output=True, timeout=2)
-    else:
-        subprocess.run(["xdotool", "key", "--window", str(wid), "ctrl+v"],
-                        capture_output=True, timeout=2)
-
-
-def send_enter(wid):
-    """Press Enter in window without stealing focus."""
-    subprocess.run(["xdotool", "key", "--window", str(wid), "Return"],
-                    capture_output=True, timeout=2)
 
 
 def main():
@@ -114,12 +89,9 @@ def main():
 
     target_is_term = is_terminal(target_wid)
     window_type = "terminal" if target_is_term else "window"
+    paste_key = "ctrl+shift+v" if target_is_term else "ctrl+v"
 
     print(f"Locked to: {window_name} ({window_type})")
-    if target_is_term:
-        print("  Paste: Ctrl+Shift+V  |  Auto-submit: Enter")
-    else:
-        print("  Paste: Ctrl+V")
     print()
     print("Use Speech Note in clipboard mode.")
     print("Dictated text will auto-paste + submit into the locked window.")
@@ -140,10 +112,31 @@ def main():
         current = get_clipboard()
 
         if current != last_clipboard and current.strip():
-            # Send keys directly to target window — no focus change
-            paste_to_window(target_wid, target_is_term)
-            time.sleep(0.2)
-            send_enter(target_wid)
+            # Save current window
+            try:
+                active = subprocess.run(
+                    ["xdotool", "getactivewindow"],
+                    capture_output=True, text=True, timeout=2
+                )
+                active_wid = active.stdout.strip()
+            except Exception:
+                active_wid = None
+
+            # Focus target, paste, enter, refocus
+            subprocess.run(["xdotool", "windowactivate", "--sync", target_wid],
+                            capture_output=True, timeout=3)
+            time.sleep(0.1)
+            subprocess.run(["xdotool", "key", paste_key],
+                            capture_output=True, timeout=2)
+            time.sleep(0.15)
+            subprocess.run(["xdotool", "key", "Return"],
+                            capture_output=True, timeout=2)
+            time.sleep(0.1)
+
+            # Refocus original window
+            if active_wid and active_wid != target_wid:
+                subprocess.run(["xdotool", "windowactivate", "--sync", active_wid],
+                                capture_output=True, timeout=3)
 
             preview = current.strip()[:60]
             print(f"  Pasted: {preview}")
