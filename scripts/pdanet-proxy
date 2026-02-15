@@ -12,6 +12,7 @@ RELAY_PORT="12345"    # http-relay for plain HTTP (port 80)
 CONNECT_PORT="12346"  # http-connect for HTTPS (port 443)
 CONF="/tmp/redsocks-pdanet.conf"
 PID="/tmp/redsocks-pdanet.pid"
+DNS_BACKUP="/tmp/redsocks-dns-backup"
 
 detect_interface() {
     local iface
@@ -42,6 +43,17 @@ cleanup() {
     # Also kill by config path in case PID file was lost
     pkill -f "redsocks -c $CONF" 2>/dev/null
     rm -f "$CONF"
+
+    # Restore DNS if we changed it
+    if [ -f "$DNS_BACKUP" ]; then
+        local iface
+        iface=$(detect_interface)
+        if [ -n "$iface" ]; then
+            # Reset to DHCP-provided DNS
+            resolvectl revert "$iface" 2>/dev/null
+        fi
+        rm -f "$DNS_BACKUP"
+    fi
 }
 
 start_proxy() {
@@ -67,6 +79,12 @@ start_proxy() {
 
     # Always clean up first (idempotent — handles stale state, duplicates)
     cleanup
+
+    # Set Google DNS — PDANet gateway doesn't serve DNS
+    # Save current DNS so we can restore on stop
+    resolvectl dns "$iface" 2>/dev/null > "$DNS_BACKUP"
+    resolvectl dns "$iface" 8.8.8.8 8.8.4.4
+    echo "Set DNS to 8.8.8.8 / 8.8.4.4"
 
     # Write redsocks config — two instances:
     # 1. http-relay on RELAY_PORT for plain HTTP (rewrites request for proxy)
