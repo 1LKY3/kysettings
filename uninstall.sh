@@ -1,9 +1,34 @@
 #!/bin/bash
 echo "=== KySettings Uninstaller ==="
 
+# Stop any active PDANet proxy
+if [ -f ~/.local/bin/pdanet-proxy ]; then
+    sudo ~/.local/bin/pdanet-proxy stop 2>/dev/null || true
+fi
+
+# Reset GNOME system proxy if it was set to PDANet
+MODE=$(gsettings get org.gnome.system.proxy mode 2>/dev/null)
+if [ "$MODE" = "'manual'" ]; then
+    HOST=$(gsettings get org.gnome.system.proxy.http host 2>/dev/null)
+    if echo "$HOST" | grep -q "192.168.49.1"; then
+        echo "Resetting PDANet proxy settings..."
+        gsettings set org.gnome.system.proxy mode 'none'
+        gsettings reset org.gnome.system.proxy.http host
+        gsettings reset org.gnome.system.proxy.http port
+        gsettings reset org.gnome.system.proxy.https host
+        gsettings reset org.gnome.system.proxy.https port
+        gsettings reset org.gnome.system.proxy ignore-hosts
+    fi
+fi
+
+# Remove proxy env file and apt proxy config
+rm -f ~/.proxy_env
+sudo rm -f /etc/apt/apt.conf.d/99pdanet-proxy 2>/dev/null || true
+
 # Remove binaries
 rm -f ~/.local/bin/kysettings
 rm -f ~/.local/bin/pdanet-proxy
+rm -f ~/.local/bin/pdanet
 pkill -f minecraft-auto-mute 2>/dev/null || true
 rm -f ~/.local/bin/minecraft-auto-mute.sh
 pkill -f speech-lock 2>/dev/null || true
@@ -31,4 +56,10 @@ if 'com.ky.settings.desktop' in favs:
 " 2>/dev/null || true
 
 echo ""
-echo "KySettings has been completely removed."
+echo "KySettings has been removed."
+echo ""
+echo "The following packages were installed as dependencies and are still present:"
+echo "  python3-gi  gir1.2-adw-1  redsocks"
+echo ""
+echo "To remove them manually if no longer needed:"
+echo "  sudo apt remove python3-gi gir1.2-adw-1 redsocks"

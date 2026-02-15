@@ -10,7 +10,7 @@ cd kysettings
 ./install.sh
 ```
 
-The installer checks for dependencies (`python3-gi`, `gir1.2-adw-1`) and installs them if missing.
+The installer installs all dependencies automatically.
 
 ## Usage
 
@@ -27,6 +27,20 @@ Or search **"Ky Settings"** in your app launcher.
 ./uninstall.sh
 ```
 
+This removes KySettings and all its helper scripts. It also cleans up any active PDANet proxy settings and the apt proxy config.
+
+The following system packages are installed by `./install.sh` but are **not removed** by the uninstaller (they may be used by other programs):
+
+- `python3` — Python interpreter
+- `python3-gi` — Python GObject Introspection bindings
+- `gir1.2-adw-1` — Libadwaita typelib for GTK 4
+- `redsocks` — Transparent TCP proxy redirector (used by PDANet transparent proxy)
+
+To remove them manually if no longer needed:
+```bash
+sudo apt remove python3-gi gir1.2-adw-1 redsocks
+```
+
 ## Features
 
 **Display**
@@ -36,7 +50,8 @@ Or search **"Ky Settings"** in your app launcher.
 
 **Wireless**
 - Bluetooth power toggle and adapter reset
-- PDANet+ transparent proxy (routes all TCP through USB tether via redsocks)
+- PDANet+ Proxy — sets GNOME system proxy + shell env vars + apt config for WiFi tethering through PDANet+
+- Transparent Proxy (redsocks) — routes ALL TCP traffic through PDANet+ via iptables for apps that ignore system proxy settings
 
 **Keyboard**
 - Type Date shortcut (Ctrl+Alt+. inserts current date/time)
@@ -48,8 +63,18 @@ Or search **"Ky Settings"** in your app launcher.
 - Countdown timer
 - Stopwatch
 
+## CLI
+
+PDANet proxy can also be toggled from the terminal:
+
+```bash
+pdanet on       # Enable system proxy (gsettings + env vars + apt)
+pdanet off      # Disable and reset all settings
+pdanet status   # Check current state
+```
+
 ## Requirements
 
 - Ubuntu 22.04+ (or any distro with GTK 4 / Libadwaita)
 - Python 3.10+
-- `python3-gi`, `gir1.2-adw-1`
+- Dependencies installed automatically by `./install.sh`
