@@ -1,5 +1,5 @@
 #!/bin/bash
-# PDANet+ Proxy — routes all TCP traffic through PDANet+ HTTP proxy
+# PDANet+ Proxy — routes HTTP/HTTPS traffic through PDANet+ HTTP proxy
 # Supports WiFi hotspot (primary) and USB tether (fallback)
 # Uses redsocks to transparently redirect via iptables
 #
@@ -8,13 +8,12 @@
 
 PROXY_IP="192.168.49.1"
 PROXY_PORT="8000"
-LOCAL_PORT="12345"
+RELAY_PORT="12345"    # http-relay for plain HTTP (port 80)
+CONNECT_PORT="12346"  # http-connect for HTTPS (port 443)
 CONF="/tmp/redsocks-pdanet.conf"
 PID="/tmp/redsocks-pdanet.pid"
 
 detect_interface() {
-    # Check for any interface on PDANet's 192.168.49.0/24 subnet
-    # WiFi hotspot (primary) or USB tether (fallback)
     local iface
     iface=$(ip -4 addr show | grep "192\.168\.49\." | awk '{print $NF}')
     if [ -n "$iface" ]; then
@@ -25,21 +24,32 @@ detect_interface() {
 }
 
 check_reachable() {
-    # Verify the proxy is actually reachable before starting
-    if ping -c 1 -W 2 "$PROXY_IP" >/dev/null 2>&1; then
-        return 0
+    ping -c 1 -W 2 "$PROXY_IP" >/dev/null 2>&1
+}
+
+cleanup() {
+    # Idempotent cleanup — safe to call multiple times
+    # Remove ALL REDSOCKS references from OUTPUT (handles duplicates)
+    while iptables -t nat -D OUTPUT -p tcp -j REDSOCKS 2>/dev/null; do :; done
+    iptables -t nat -F REDSOCKS 2>/dev/null
+    iptables -t nat -X REDSOCKS 2>/dev/null
+
+    # Kill any redsocks we started
+    if [ -f "$PID" ]; then
+        kill "$(cat "$PID")" 2>/dev/null
+        rm -f "$PID"
     fi
-    return 1
+    # Also kill by config path in case PID file was lost
+    pkill -f "redsocks -c $CONF" 2>/dev/null
+    rm -f "$CONF"
 }
 
 start_proxy() {
-    # Check redsocks is installed
     if ! command -v redsocks >/dev/null 2>&1; then
         echo "ERROR: redsocks not installed. Run: sudo apt install redsocks"
         exit 1
     fi
 
-    # Detect PDANet interface (WiFi or USB)
     local iface
     iface=$(detect_interface)
     if [ -z "$iface" ]; then
@@ -49,20 +59,18 @@ start_proxy() {
     fi
     echo "Detected PDANet interface: $iface"
 
-    # Verify proxy is reachable
     if ! check_reachable; then
         echo "ERROR: $PROXY_IP not reachable on $iface"
         echo "Is PDANet+ running on your phone?"
         exit 1
     fi
 
-    # Kill stale redsocks if PID file exists
-    if [ -f "$PID" ]; then
-        kill "$(cat "$PID")" 2>/dev/null
-        rm -f "$PID"
-    fi
+    # Always clean up first (idempotent — handles stale state, duplicates)
+    cleanup
 
-    # Write redsocks config
+    # Write redsocks config — two instances:
+    # 1. http-relay on RELAY_PORT for plain HTTP (rewrites request for proxy)
+    # 2. http-connect on CONNECT_PORT for HTTPS (tunnels via CONNECT method)
     cat > "$CONF" <<EOF
 base {
     log_debug = off;
@@ -72,14 +80,20 @@ base {
 }
 redsocks {
     local_ip = 127.0.0.1;
-    local_port = $LOCAL_PORT;
+    local_port = $RELAY_PORT;
+    ip = $PROXY_IP;
+    port = $PROXY_PORT;
+    type = http-relay;
+}
+redsocks {
+    local_ip = 127.0.0.1;
+    local_port = $CONNECT_PORT;
     ip = $PROXY_IP;
     port = $PROXY_PORT;
     type = http-connect;
 }
 EOF
 
-    # Start redsocks
     redsocks -c "$CONF" -p "$PID"
     if [ $? -ne 0 ]; then
         echo "ERROR: redsocks failed to start"
@@ -87,10 +101,13 @@ EOF
         exit 1
     fi
 
-    # Create iptables chain
-    iptables -t nat -N REDSOCKS 2>/dev/null
+    # Wait briefly for redsocks to bind
+    sleep 0.3
 
-    # Skip local/private/VPN addresses (don't proxy LAN or Tailscale traffic)
+    # Create iptables chain (fresh — cleanup already removed old one)
+    iptables -t nat -N REDSOCKS
+
+    # Skip local/private/VPN addresses
     iptables -t nat -A REDSOCKS -d 0.0.0.0/8 -j RETURN
     iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
     iptables -t nat -A REDSOCKS -d 100.64.0.0/10 -j RETURN  # Tailscale CGNAT
@@ -101,36 +118,25 @@ EOF
     iptables -t nat -A REDSOCKS -d 224.0.0.0/4 -j RETURN
     iptables -t nat -A REDSOCKS -d 240.0.0.0/4 -j RETURN
 
-    # Redirect only HTTP/HTTPS ports (PDANet proxy only handles HTTP traffic)
-    iptables -t nat -A REDSOCKS -p tcp --dport 80 -j REDIRECT --to-ports "$LOCAL_PORT"
-    iptables -t nat -A REDSOCKS -p tcp --dport 443 -j REDIRECT --to-ports "$LOCAL_PORT"
-    iptables -t nat -A REDSOCKS -p tcp --dport 8080 -j REDIRECT --to-ports "$LOCAL_PORT"
-    iptables -t nat -A REDSOCKS -p tcp --dport 8443 -j REDIRECT --to-ports "$LOCAL_PORT"
+    # HTTP → http-relay (proper proxy request rewriting)
+    iptables -t nat -A REDSOCKS -p tcp --dport 80 -j REDIRECT --to-ports "$RELAY_PORT"
+    iptables -t nat -A REDSOCKS -p tcp --dport 8080 -j REDIRECT --to-ports "$RELAY_PORT"
+    # HTTPS → http-connect (CONNECT tunnel)
+    iptables -t nat -A REDSOCKS -p tcp --dport 443 -j REDIRECT --to-ports "$CONNECT_PORT"
+    iptables -t nat -A REDSOCKS -p tcp --dport 8443 -j REDIRECT --to-ports "$CONNECT_PORT"
 
-    # Activate: hook into OUTPUT chain
+    # Activate
     iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
 
     echo "PDANet+ proxy started ($PROXY_IP:$PROXY_PORT via $iface)"
 }
 
 stop_proxy() {
-    # Remove iptables rules
-    iptables -t nat -D OUTPUT -p tcp -j REDSOCKS 2>/dev/null
-    iptables -t nat -F REDSOCKS 2>/dev/null
-    iptables -t nat -X REDSOCKS 2>/dev/null
-
-    # Kill redsocks
-    if [ -f "$PID" ]; then
-        kill "$(cat "$PID")" 2>/dev/null
-        rm -f "$PID"
-    fi
-    rm -f "$CONF"
-
+    cleanup
     echo "PDANet+ proxy stopped"
 }
 
 check_status() {
-    # No root needed — check PID file and /proc (readable by any user)
     if [ -f "$PID" ]; then
         local pid
         pid=$(cat "$PID" 2>/dev/null)
@@ -140,7 +146,6 @@ check_status() {
             echo "running (${iface:-unknown interface})"
             exit 0
         else
-            # Stale PID file — process died
             rm -f "$PID" 2>/dev/null
         fi
     fi
