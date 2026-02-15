@@ -90,9 +90,10 @@ EOF
     # Create iptables chain
     iptables -t nat -N REDSOCKS 2>/dev/null
 
-    # Skip local/private addresses (don't proxy LAN traffic)
+    # Skip local/private/VPN addresses (don't proxy LAN or Tailscale traffic)
     iptables -t nat -A REDSOCKS -d 0.0.0.0/8 -j RETURN
     iptables -t nat -A REDSOCKS -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A REDSOCKS -d 100.64.0.0/10 -j RETURN  # Tailscale CGNAT
     iptables -t nat -A REDSOCKS -d 127.0.0.0/8 -j RETURN
     iptables -t nat -A REDSOCKS -d 169.254.0.0/16 -j RETURN
     iptables -t nat -A REDSOCKS -d 172.16.0.0/12 -j RETURN
@@ -126,18 +127,22 @@ stop_proxy() {
 }
 
 check_status() {
-    # No root needed — check PID file and process alive
-    if [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then
-        local iface
-        iface=$(detect_interface)
-        echo "running (${iface:-unknown interface})"
-        exit 0
-    else
-        # Clean up stale PID file
-        [ -f "$PID" ] && rm -f "$PID"
-        echo "stopped"
-        exit 1
+    # No root needed — check PID file and /proc (readable by any user)
+    if [ -f "$PID" ]; then
+        local pid
+        pid=$(cat "$PID" 2>/dev/null)
+        if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+            local iface
+            iface=$(detect_interface)
+            echo "running (${iface:-unknown interface})"
+            exit 0
+        else
+            # Stale PID file — process died
+            rm -f "$PID" 2>/dev/null
+        fi
     fi
+    echo "stopped"
+    exit 1
 }
 
 case "$1" in

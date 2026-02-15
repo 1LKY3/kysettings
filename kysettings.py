@@ -459,18 +459,54 @@ done
         """Start or stop the redsocks transparent proxy."""
         if self._initializing:
             return
+        script = os.path.expanduser("~/.local/bin/pdanet-proxy")
         if row.get_active():
-            subprocess.Popen(
-                ["pkexec", os.path.expanduser("~/.local/bin/pdanet-proxy"), "start"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            self._redsocks_action = "start"
+            self._redsocks_proc = subprocess.Popen(
+                ["pkexec", script, "start"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
             )
         else:
-            subprocess.Popen(
-                ["pkexec", os.path.expanduser("~/.local/bin/pdanet-proxy"), "stop"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            self._redsocks_action = "stop"
+            self._redsocks_proc = subprocess.Popen(
+                ["pkexec", script, "stop"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
             )
+        GLib.timeout_add(2000, self._redsocks_verify, row)
+
+    def _redsocks_verify(self, row):
+        """Verify redsocks toggle result after action completes."""
+        # Collect output from the process
+        output = ""
+        if hasattr(self, '_redsocks_proc') and self._redsocks_proc:
+            try:
+                self._redsocks_proc.wait(timeout=1)
+                output = self._redsocks_proc.stdout.read().decode(errors='replace')
+            except Exception:
+                pass
+
+        running = self.is_redsocks_proxy_running()
+        wanted = self._redsocks_action == "start"
+
+        if running != wanted:
+            # State doesn't match — revert toggle and show error
+            self._initializing = True
+            row.set_active(running)
+            self._initializing = False
+            msg = output.strip() if output.strip() else (
+                "Could not start proxy. Is PDANet WiFi connected?"
+                if wanted else "Could not stop proxy."
+            )
+            dialog = Adw.MessageDialog(
+                transient_for=self.win,
+                heading="Proxy Error",
+                body=msg,
+            )
+            dialog.add_response("ok", "OK")
+            dialog.present()
+        return False
 
     _PDANET_PROXY_HOST = "192.168.49.1"
     _PDANET_PROXY_PORT = 8000
