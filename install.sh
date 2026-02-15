@@ -3,18 +3,23 @@ set -e
 
 echo "=== KySettings Installer ==="
 
-# Check for required system packages
+# All dependencies — install everything upfront so nothing needs internet later
+ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks)
 MISSING=()
-for pkg in python3 python3-gi gir1.2-adw-1; do
+for pkg in "${ALL_DEPS[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then
         MISSING+=("$pkg")
     fi
 done
 
 if [ ${#MISSING[@]} -gt 0 ]; then
-    echo "Installing missing dependencies: ${MISSING[*]}"
+    echo "Installing dependencies: ${MISSING[*]}"
     sudo apt install -y "${MISSING[@]}"
 fi
+
+# Disable default redsocks service (we manage our own instance)
+sudo systemctl stop redsocks 2>/dev/null || true
+sudo systemctl disable redsocks 2>/dev/null || true
 
 # Create directories
 mkdir -p ~/.local/bin

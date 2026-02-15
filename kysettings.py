@@ -375,31 +375,17 @@ done
         self.pda_toggle_row = pda_toggle_row
 
         # Redsocks — transparent proxy for ALL TCP traffic
-        redsocks_installed = self.is_redsocks_installed()
-
         pda_redsocks_toggle = Adw.SwitchRow()
         pda_redsocks_toggle.set_title("Transparent Proxy (redsocks)")
-        if redsocks_installed:
+        if self.is_redsocks_installed():
             pda_redsocks_toggle.set_subtitle("All TCP traffic via iptables — captures every app")
             pda_redsocks_toggle.set_active(self.is_redsocks_proxy_running())
         else:
-            pda_redsocks_toggle.set_subtitle("redsocks not installed")
+            pda_redsocks_toggle.set_subtitle("redsocks missing — run ./install.sh to fix")
             pda_redsocks_toggle.set_sensitive(False)
         pda_redsocks_toggle.connect("notify::active", self.on_redsocks_proxy_toggle)
         pda_group.add(pda_redsocks_toggle)
         self.pda_redsocks_toggle = pda_redsocks_toggle
-
-        # Install button if redsocks missing
-        if not redsocks_installed:
-            install_row = Adw.ActionRow()
-            install_row.set_title("Install redsocks")
-            install_row.set_subtitle("Required for transparent TCP proxy")
-            btn = Gtk.Button(label="Install")
-            btn.set_valign(Gtk.Align.CENTER)
-            btn.connect("clicked", self.on_redsocks_install)
-            install_row.add_suffix(btn)
-            self.pda_redsocks_btn = btn
-            pda_group.add(install_row)
 
         page.add(pda_group)
         self.stack.add_titled(page, "wireless", "Wireless")
@@ -457,27 +443,6 @@ done
         except:
             return False
 
-    def on_redsocks_install(self, button):
-        """Install redsocks via apt."""
-        button.set_sensitive(False)
-        button.set_label("Installing...")
-        subprocess.Popen(
-            ["pkexec", "apt", "install", "-y", "redsocks"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        GLib.timeout_add(10000, self._redsocks_install_done)
-
-    def _redsocks_install_done(self):
-        if self.is_redsocks_installed():
-            self.pda_redsocks_btn.set_label("Installed")
-            self.pda_redsocks_btn.set_sensitive(False)
-            self.pda_redsocks_toggle.set_subtitle("All TCP traffic via iptables — captures every app")
-            self.pda_redsocks_toggle.set_sensitive(True)
-        else:
-            self.pda_redsocks_btn.set_label("Install")
-            self.pda_redsocks_btn.set_sensitive(True)
-        return False
 
     def is_redsocks_proxy_running(self):
         """Check if redsocks transparent proxy is active (no root needed)."""
