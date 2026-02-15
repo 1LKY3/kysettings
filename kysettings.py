@@ -363,28 +363,43 @@ done
         # PDANet+ Proxy group
         pda_group = Adw.PreferencesGroup()
         pda_group.set_title("PDANet+ Proxy")
-        pda_group.set_description("Route all traffic through PDANet+ USB tether")
+        pda_group.set_description("Route traffic through PDANet+ WiFi tether")
 
-        # Install row
-        pda_install_row = Adw.ActionRow()
-        pda_install_row.set_title("Install redsocks")
-        pda_install_row.set_subtitle("Required for transparent proxy redirect")
-        self.pda_install_btn = Gtk.Button(label="Installed" if self.is_redsocks_installed() else "Install")
-        self.pda_install_btn.set_valign(Gtk.Align.CENTER)
-        self.pda_install_btn.set_sensitive(not self.is_redsocks_installed())
-        self.pda_install_btn.connect("clicked", self.on_pdanet_install)
-        pda_install_row.add_suffix(self.pda_install_btn)
-        pda_group.add(pda_install_row)
-
-        # Proxy toggle
+        # System proxy toggle (gsettings — browsers, GUI apps, CLI tools)
         pda_toggle_row = Adw.SwitchRow()
         pda_toggle_row.set_title("PDANet+ Proxy")
-        pda_toggle_row.set_subtitle("192.168.49.1:8000 — all traffic via tether")
-        pda_toggle_row.set_active(self.is_pdanet_proxy_running())
-        pda_toggle_row.set_sensitive(self.is_redsocks_installed())
+        pda_toggle_row.set_subtitle("192.168.49.1:8000 — system proxy via tether")
+        pda_toggle_row.set_active(self.is_pdanet_proxy_active())
         pda_toggle_row.connect("notify::active", self.on_pdanet_proxy_toggle)
         pda_group.add(pda_toggle_row)
         self.pda_toggle_row = pda_toggle_row
+
+        # Redsocks — transparent proxy for ALL TCP traffic
+        redsocks_installed = self.is_redsocks_installed()
+
+        pda_redsocks_toggle = Adw.SwitchRow()
+        pda_redsocks_toggle.set_title("Transparent Proxy (redsocks)")
+        if redsocks_installed:
+            pda_redsocks_toggle.set_subtitle("All TCP traffic via iptables — captures every app")
+            pda_redsocks_toggle.set_active(self.is_redsocks_proxy_running())
+        else:
+            pda_redsocks_toggle.set_subtitle("redsocks not installed")
+            pda_redsocks_toggle.set_sensitive(False)
+        pda_redsocks_toggle.connect("notify::active", self.on_redsocks_proxy_toggle)
+        pda_group.add(pda_redsocks_toggle)
+        self.pda_redsocks_toggle = pda_redsocks_toggle
+
+        # Install button if redsocks missing
+        if not redsocks_installed:
+            install_row = Adw.ActionRow()
+            install_row.set_title("Install redsocks")
+            install_row.set_subtitle("Required for transparent TCP proxy")
+            btn = Gtk.Button(label="Install")
+            btn.set_valign(Gtk.Align.CENTER)
+            btn.connect("clicked", self.on_redsocks_install)
+            install_row.add_suffix(btn)
+            self.pda_redsocks_btn = btn
+            pda_group.add(install_row)
 
         page.add(pda_group)
         self.stack.add_titled(page, "wireless", "Wireless")
@@ -442,18 +457,7 @@ done
         except:
             return False
 
-    def is_pdanet_proxy_running(self):
-        """Check if the PDANet+ proxy is currently active."""
-        try:
-            result = subprocess.run(
-                ["pkexec", os.path.expanduser("~/.local/bin/pdanet-proxy"), "status"],
-                capture_output=True, text=True, timeout=5
-            )
-            return "running" in result.stdout
-        except:
-            return False
-
-    def on_pdanet_install(self, button):
+    def on_redsocks_install(self, button):
         """Install redsocks via apt."""
         button.set_sensitive(False)
         button.set_label("Installing...")
@@ -462,20 +466,32 @@ done
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        # Check after 10 seconds if install finished
-        GLib.timeout_add(10000, self._pdanet_install_done)
+        GLib.timeout_add(10000, self._redsocks_install_done)
 
-    def _pdanet_install_done(self):
+    def _redsocks_install_done(self):
         if self.is_redsocks_installed():
-            self.pda_install_btn.set_label("Installed")
-            self.pda_toggle_row.set_sensitive(True)
+            self.pda_redsocks_btn.set_label("Installed")
+            self.pda_redsocks_btn.set_sensitive(False)
+            self.pda_redsocks_toggle.set_subtitle("All TCP traffic via iptables — captures every app")
+            self.pda_redsocks_toggle.set_sensitive(True)
         else:
-            self.pda_install_btn.set_label("Install")
-            self.pda_install_btn.set_sensitive(True)
+            self.pda_redsocks_btn.set_label("Install")
+            self.pda_redsocks_btn.set_sensitive(True)
         return False
 
-    def on_pdanet_proxy_toggle(self, row, _):
-        """Start or stop the PDANet+ transparent proxy."""
+    def is_redsocks_proxy_running(self):
+        """Check if redsocks transparent proxy is active (no root needed)."""
+        try:
+            result = subprocess.run(
+                [os.path.expanduser("~/.local/bin/pdanet-proxy"), "status"],
+                capture_output=True, text=True, timeout=5
+            )
+            return "running" in result.stdout
+        except:
+            return False
+
+    def on_redsocks_proxy_toggle(self, row, _):
+        """Start or stop the redsocks transparent proxy."""
         if self._initializing:
             return
         if row.get_active():
@@ -490,6 +506,128 @@ done
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+
+    _PDANET_PROXY_HOST = "192.168.49.1"
+    _PDANET_PROXY_PORT = 8000
+    _PDANET_IGNORE_HOSTS = "['localhost', '127.0.0.0/8', '::1', '192.168.49.*']"
+    _PDANET_ENV_FILE = os.path.expanduser("~/.proxy_env")
+
+    def is_pdanet_proxy_active(self):
+        """Check if GNOME system proxy is set to PDANet+."""
+        try:
+            result = subprocess.run(
+                ["gsettings", "get", "org.gnome.system.proxy", "mode"],
+                capture_output=True, text=True, timeout=5
+            )
+            if "'manual'" not in result.stdout:
+                return False
+            result = subprocess.run(
+                ["gsettings", "get", "org.gnome.system.proxy.http", "host"],
+                capture_output=True, text=True, timeout=5
+            )
+            return self._PDANET_PROXY_HOST in result.stdout
+        except:
+            return False
+
+    def on_pdanet_proxy_toggle(self, row, _):
+        """Toggle PDANet+ system proxy via GNOME gsettings."""
+        if self._initializing:
+            return
+        if row.get_active():
+            self._pdanet_proxy_enable()
+        else:
+            self._pdanet_proxy_disable()
+
+    def _pdanet_proxy_enable(self):
+        """Set GNOME system proxy + env vars for CLI tools."""
+        host = self._PDANET_PROXY_HOST
+        port = str(self._PDANET_PROXY_PORT)
+        proxy_url = f"http://{host}:{port}"
+
+        # 1. GNOME system proxy (browsers, GUI apps)
+        cmds = [
+            ["gsettings", "set", "org.gnome.system.proxy", "mode", "manual"],
+            ["gsettings", "set", "org.gnome.system.proxy.http", "host", host],
+            ["gsettings", "set", "org.gnome.system.proxy.http", "port", port],
+            ["gsettings", "set", "org.gnome.system.proxy.https", "host", host],
+            ["gsettings", "set", "org.gnome.system.proxy.https", "port", port],
+            ["gsettings", "set", "org.gnome.system.proxy", "ignore-hosts", self._PDANET_IGNORE_HOSTS],
+        ]
+        for cmd in cmds:
+            subprocess.run(cmd, capture_output=True, timeout=5)
+
+        # 2. Env var file sourced by shells (curl, wget, git, apt, pip, etc.)
+        no_proxy = "localhost,127.0.0.0/8,::1,192.168.49.*"
+        env_content = (
+            f'export http_proxy="{proxy_url}"\n'
+            f'export https_proxy="{proxy_url}"\n'
+            f'export HTTP_PROXY="{proxy_url}"\n'
+            f'export HTTPS_PROXY="{proxy_url}"\n'
+            f'export no_proxy="{no_proxy}"\n'
+            f'export NO_PROXY="{no_proxy}"\n'
+        )
+        try:
+            with open(self._PDANET_ENV_FILE, "w") as f:
+                f.write(env_content)
+        except Exception:
+            pass
+
+        # Ensure bashrc sources the env file
+        self._ensure_bashrc_hook()
+
+        # 3. apt proxy (needs its own config)
+        apt_conf = f'Acquire::http::Proxy "{proxy_url}";\nAcquire::https::Proxy "{proxy_url}";\n'
+        try:
+            subprocess.run(
+                ["pkexec", "bash", "-c", f'echo \'{apt_conf}\' > /etc/apt/apt.conf.d/99pdanet-proxy'],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+
+    def _pdanet_proxy_disable(self):
+        """Reset all proxy settings to defaults."""
+        # 1. GNOME system proxy
+        cmds = [
+            ["gsettings", "set", "org.gnome.system.proxy", "mode", "none"],
+            ["gsettings", "reset", "org.gnome.system.proxy.http", "host"],
+            ["gsettings", "reset", "org.gnome.system.proxy.http", "port"],
+            ["gsettings", "reset", "org.gnome.system.proxy.https", "host"],
+            ["gsettings", "reset", "org.gnome.system.proxy.https", "port"],
+            ["gsettings", "reset", "org.gnome.system.proxy", "ignore-hosts"],
+        ]
+        for cmd in cmds:
+            subprocess.run(cmd, capture_output=True, timeout=5)
+
+        # 2. Remove env var file
+        try:
+            os.remove(self._PDANET_ENV_FILE)
+        except FileNotFoundError:
+            pass
+
+        # 3. Remove apt proxy config
+        try:
+            subprocess.run(
+                ["pkexec", "rm", "-f", "/etc/apt/apt.conf.d/99pdanet-proxy"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+
+    def _ensure_bashrc_hook(self):
+        """Add proxy_env source line to ~/.bashrc if not already present."""
+        bashrc = os.path.expanduser("~/.bashrc")
+        hook = '[ -f ~/.proxy_env ] && . ~/.proxy_env'
+        try:
+            existing = ""
+            if os.path.exists(bashrc):
+                with open(bashrc, "r") as f:
+                    existing = f.read()
+            if hook not in existing:
+                with open(bashrc, "a") as f:
+                    f.write(f"\n# PDANet proxy env vars (managed by kysettings)\n{hook}\n")
+        except Exception:
+            pass
 
     def on_blank_changed(self, row, _):
         _, seconds = self.blank_options[row.get_selected()]

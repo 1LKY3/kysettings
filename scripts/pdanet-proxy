@@ -1,5 +1,6 @@
 #!/bin/bash
 # PDANet+ Proxy — routes all TCP traffic through PDANet+ HTTP proxy
+# Supports WiFi hotspot (primary) and USB tether (fallback)
 # Uses redsocks to transparently redirect via iptables
 #
 # Usage: pdanet-proxy start|stop|status
@@ -11,7 +12,56 @@ LOCAL_PORT="12345"
 CONF="/tmp/redsocks-pdanet.conf"
 PID="/tmp/redsocks-pdanet.pid"
 
+detect_interface() {
+    # Check for any interface on PDANet's 192.168.49.0/24 subnet
+    # WiFi hotspot (primary) or USB tether (fallback)
+    local iface
+    iface=$(ip -4 addr show | grep "192\.168\.49\." | awk '{print $NF}')
+    if [ -n "$iface" ]; then
+        echo "$iface"
+        return 0
+    fi
+    return 1
+}
+
+check_reachable() {
+    # Verify the proxy is actually reachable before starting
+    if ping -c 1 -W 2 "$PROXY_IP" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
 start_proxy() {
+    # Check redsocks is installed
+    if ! command -v redsocks >/dev/null 2>&1; then
+        echo "ERROR: redsocks not installed. Run: sudo apt install redsocks"
+        exit 1
+    fi
+
+    # Detect PDANet interface (WiFi or USB)
+    local iface
+    iface=$(detect_interface)
+    if [ -z "$iface" ]; then
+        echo "ERROR: No PDANet interface found (no interface on 192.168.49.0/24)"
+        echo "Connect to PDANet WiFi hotspot or plug in USB tether first."
+        exit 1
+    fi
+    echo "Detected PDANet interface: $iface"
+
+    # Verify proxy is reachable
+    if ! check_reachable; then
+        echo "ERROR: $PROXY_IP not reachable on $iface"
+        echo "Is PDANet+ running on your phone?"
+        exit 1
+    fi
+
+    # Kill stale redsocks if PID file exists
+    if [ -f "$PID" ]; then
+        kill "$(cat "$PID")" 2>/dev/null
+        rm -f "$PID"
+    fi
+
     # Write redsocks config
     cat > "$CONF" <<EOF
 base {
@@ -25,12 +75,17 @@ redsocks {
     local_port = $LOCAL_PORT;
     ip = $PROXY_IP;
     port = $PROXY_PORT;
-    type = http-relay;
+    type = http-connect;
 }
 EOF
 
     # Start redsocks
     redsocks -c "$CONF" -p "$PID"
+    if [ $? -ne 0 ]; then
+        echo "ERROR: redsocks failed to start"
+        rm -f "$CONF"
+        exit 1
+    fi
 
     # Create iptables chain
     iptables -t nat -N REDSOCKS 2>/dev/null
@@ -51,7 +106,7 @@ EOF
     # Activate: hook into OUTPUT chain
     iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
 
-    echo "PDANet+ proxy started ($PROXY_IP:$PROXY_PORT)"
+    echo "PDANet+ proxy started ($PROXY_IP:$PROXY_PORT via $iface)"
 }
 
 stop_proxy() {
@@ -71,10 +126,15 @@ stop_proxy() {
 }
 
 check_status() {
-    if iptables -t nat -L REDSOCKS >/dev/null 2>&1 && [ -f "$PID" ]; then
-        echo "running"
+    # No root needed — check PID file and process alive
+    if [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then
+        local iface
+        iface=$(detect_interface)
+        echo "running (${iface:-unknown interface})"
         exit 0
     else
+        # Clean up stale PID file
+        [ -f "$PID" ] && rm -f "$PID"
         echo "stopped"
         exit 1
     fi

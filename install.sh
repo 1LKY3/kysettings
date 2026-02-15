@@ -28,6 +28,9 @@ chmod +x ~/.local/bin/kysettings
 cp scripts/pdanet-proxy ~/.local/bin/pdanet-proxy
 chmod +x ~/.local/bin/pdanet-proxy
 
+cp scripts/pdanet ~/.local/bin/pdanet
+chmod +x ~/.local/bin/pdanet
+
 cp scripts/minecraft-auto-mute ~/.local/bin/minecraft-auto-mute.sh
 chmod +x ~/.local/bin/minecraft-auto-mute.sh
 

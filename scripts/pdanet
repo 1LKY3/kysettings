@@ -1,0 +1,78 @@
+#!/bin/bash
+# PDANet+ proxy toggle — gsettings + env vars
+# Usage: pdanet on|off|status
+
+PROXY_HOST="192.168.49.1"
+PROXY_PORT="8000"
+PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
+ENV_FILE="$HOME/.proxy_env"
+NO_PROXY="localhost,127.0.0.0/8,::1,192.168.49.*"
+IGNORE_HOSTS="['localhost', '127.0.0.0/8', '::1', '192.168.49.*']"
+
+on() {
+    # GNOME system proxy (browsers, GUI apps)
+    gsettings set org.gnome.system.proxy mode 'manual'
+    gsettings set org.gnome.system.proxy.http host "$PROXY_HOST"
+    gsettings set org.gnome.system.proxy.http port "$PROXY_PORT"
+    gsettings set org.gnome.system.proxy.https host "$PROXY_HOST"
+    gsettings set org.gnome.system.proxy.https port "$PROXY_PORT"
+    gsettings set org.gnome.system.proxy ignore-hosts "$IGNORE_HOSTS"
+
+    # Env vars for CLI tools (curl, wget, git, pip, etc.)
+    cat > "$ENV_FILE" <<EOF
+export http_proxy="$PROXY_URL"
+export https_proxy="$PROXY_URL"
+export HTTP_PROXY="$PROXY_URL"
+export HTTPS_PROXY="$PROXY_URL"
+export no_proxy="$NO_PROXY"
+export NO_PROXY="$NO_PROXY"
+EOF
+
+    # Apply to current shell immediately
+    source "$ENV_FILE"
+
+    # apt proxy
+    APT_CONF="Acquire::http::Proxy \"$PROXY_URL\";\nAcquire::https::Proxy \"$PROXY_URL\";"
+    echo -e "$APT_CONF" | sudo tee /etc/apt/apt.conf.d/99pdanet-proxy >/dev/null 2>&1
+
+    echo "PDANet+ proxy ON ($PROXY_URL)"
+}
+
+off() {
+    # GNOME system proxy
+    gsettings set org.gnome.system.proxy mode 'none'
+    gsettings reset org.gnome.system.proxy.http host
+    gsettings reset org.gnome.system.proxy.http port
+    gsettings reset org.gnome.system.proxy.https host
+    gsettings reset org.gnome.system.proxy.https port
+    gsettings reset org.gnome.system.proxy ignore-hosts
+
+    # Env vars
+    rm -f "$ENV_FILE"
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY
+
+    # apt proxy
+    sudo rm -f /etc/apt/apt.conf.d/99pdanet-proxy 2>/dev/null
+
+    echo "PDANet+ proxy OFF (all settings cleared)"
+}
+
+status() {
+    MODE=$(gsettings get org.gnome.system.proxy mode)
+    if [[ "$MODE" == "'manual'" ]]; then
+        HOST=$(gsettings get org.gnome.system.proxy.http host)
+        PORT=$(gsettings get org.gnome.system.proxy.http port)
+        echo "ON — proxy: ${HOST}:${PORT}"
+        [ -f "$ENV_FILE" ] && echo "     env: $ENV_FILE (active)"
+        [ -f /etc/apt/apt.conf.d/99pdanet-proxy ] && echo "     apt: configured"
+    else
+        echo "OFF"
+    fi
+}
+
+case "$1" in
+    on)     on ;;
+    off)    off ;;
+    status) status ;;
+    *)      echo "Usage: pdanet on|off|status"; exit 1 ;;
+esac
