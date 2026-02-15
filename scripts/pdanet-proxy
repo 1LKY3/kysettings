@@ -35,6 +35,9 @@ cleanup() {
     iptables -t nat -F REDSOCKS 2>/dev/null
     iptables -t nat -X REDSOCKS 2>/dev/null
 
+    # Remove UDP DNS block
+    while iptables -D OUTPUT -p udp --dport 53 ! -d 127.0.0.0/8 -j REJECT 2>/dev/null; do :; done
+
     # Kill any redsocks we started
     if [ -f "$PID" ]; then
         kill "$(cat "$PID")" 2>/dev/null
@@ -136,6 +139,8 @@ EOF
     iptables -t nat -A REDSOCKS -d 224.0.0.0/4 -j RETURN
     iptables -t nat -A REDSOCKS -d 240.0.0.0/4 -j RETURN
 
+    # DNS → http-connect (TCP DNS tunneled through proxy)
+    iptables -t nat -A REDSOCKS -p tcp --dport 53 -j REDIRECT --to-ports "$CONNECT_PORT"
     # HTTP → http-relay (proper proxy request rewriting)
     iptables -t nat -A REDSOCKS -p tcp --dport 80 -j REDIRECT --to-ports "$RELAY_PORT"
     iptables -t nat -A REDSOCKS -p tcp --dport 8080 -j REDIRECT --to-ports "$RELAY_PORT"
@@ -145,6 +150,10 @@ EOF
 
     # Activate
     iptables -t nat -A OUTPUT -p tcp -j REDSOCKS
+
+    # Block outgoing UDP DNS — forces systemd-resolved to use TCP
+    # (TCP DNS goes through redsocks → PDANet proxy handles resolution)
+    iptables -A OUTPUT -p udp --dport 53 ! -d 127.0.0.0/8 -j REJECT
 
     echo "PDANet+ proxy started ($PROXY_IP:$PROXY_PORT via $iface)"
 }
