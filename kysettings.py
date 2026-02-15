@@ -474,38 +474,40 @@ done
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
-        GLib.timeout_add(2000, self._redsocks_verify, row)
+        GLib.timeout_add(500, self._redsocks_poll, row)
 
-    def _redsocks_verify(self, row):
-        """Verify redsocks toggle result after action completes."""
-        # Collect output from the process
-        output = ""
+    def _redsocks_poll(self, row):
+        """Poll until pkexec process finishes, then verify."""
         if hasattr(self, '_redsocks_proc') and self._redsocks_proc:
+            rc = self._redsocks_proc.poll()
+            if rc is None:
+                # Still running (user typing password) — check again in 500ms
+                return True
+
+            output = ""
             try:
-                self._redsocks_proc.wait(timeout=1)
                 output = self._redsocks_proc.stdout.read().decode(errors='replace')
             except Exception:
                 pass
 
-        running = self.is_redsocks_proxy_running()
-        wanted = self._redsocks_action == "start"
+            running = self.is_redsocks_proxy_running()
+            wanted = self._redsocks_action == "start"
 
-        if running != wanted:
-            # State doesn't match — revert toggle and show error
-            self._initializing = True
-            row.set_active(running)
-            self._initializing = False
-            msg = output.strip() if output.strip() else (
-                "Could not start proxy. Is PDANet WiFi connected?"
-                if wanted else "Could not stop proxy."
-            )
-            dialog = Adw.MessageDialog(
-                transient_for=self.win,
-                heading="Proxy Error",
-                body=msg,
-            )
-            dialog.add_response("ok", "OK")
-            dialog.present()
+            if running != wanted:
+                self._initializing = True
+                row.set_active(running)
+                self._initializing = False
+                msg = output.strip() if output.strip() else (
+                    "Could not start proxy. Is PDANet WiFi connected?"
+                    if wanted else "Could not stop proxy."
+                )
+                dialog = Adw.MessageDialog(
+                    transient_for=self.win,
+                    heading="Proxy Error",
+                    body=msg,
+                )
+                dialog.add_response("ok", "OK")
+                dialog.present()
         return False
 
     _PDANET_PROXY_HOST = "192.168.49.1"
