@@ -98,29 +98,31 @@ class KySettings(Adw.Application):
         dialog.add_response("ok", "Got it")
         dialog.present()
 
-    # Kyle's preferred settings — applied by "Restore My Settings" toggle
-    RESTORE_SETTINGS = [
+    # (schema, key, kyle_value, ubuntu_default)
+    DESKTOP_SETTINGS = [
         # Theme
-        ("org.gnome.desktop.interface", "gtk-theme", "Yaru-sage-dark"),
-        ("org.gnome.desktop.interface", "color-scheme", "prefer-dark"),
-        ("org.gnome.desktop.interface", "icon-theme", "Yaru-sage"),
-        ("org.gnome.desktop.interface", "cursor-theme", "Yaru"),
+        ("org.gnome.desktop.interface", "gtk-theme", "Yaru-sage-dark", "Yaru-dark"),
+        ("org.gnome.desktop.interface", "color-scheme", "prefer-dark", "prefer-dark"),
+        ("org.gnome.desktop.interface", "icon-theme", "Yaru-sage", "Yaru"),
+        ("org.gnome.desktop.interface", "cursor-theme", "Yaru", "Yaru"),
         # Fonts
-        ("org.gnome.desktop.interface", "font-name", "Ubuntu Sans 11"),
-        ("org.gnome.desktop.interface", "document-font-name", "Sans 11"),
-        ("org.gnome.desktop.interface", "monospace-font-name", "Ubuntu Sans Mono 13"),
+        ("org.gnome.desktop.interface", "font-name", "Ubuntu Sans 11", "Ubuntu Sans 11"),
+        ("org.gnome.desktop.interface", "document-font-name", "Sans 11", "Sans 11"),
+        ("org.gnome.desktop.interface", "monospace-font-name", "Ubuntu Sans Mono 13", "Ubuntu Mono 13"),
         # Wallpaper
         ("org.gnome.desktop.background", "picture-uri-dark",
-         "file:///usr/share/backgrounds/Fuji_san_by_amaral.png"),
+         "file:///usr/share/backgrounds/Fuji_san_by_amaral.png",
+         "file:///usr/share/backgrounds/ubuntu-wallpaper-d.png"),
         ("org.gnome.desktop.background", "picture-uri",
-         "file:///usr/share/backgrounds/Fuji_san_by_amaral.png"),
-        ("org.gnome.desktop.background", "picture-options", "zoom"),
+         "file:///usr/share/backgrounds/Fuji_san_by_amaral.png",
+         "file:///usr/share/backgrounds/ubuntu-wallpaper-d.png"),
+        ("org.gnome.desktop.background", "picture-options", "zoom", "zoom"),
         # Dock
-        ("org.gnome.shell.extensions.dash-to-dock", "dock-position", "BOTTOM"),
-        ("org.gnome.shell.extensions.dash-to-dock", "dash-max-icon-size", 38),
-        ("org.gnome.shell.extensions.dash-to-dock", "autohide", True),
+        ("org.gnome.shell.extensions.dash-to-dock", "dock-position", "BOTTOM", "LEFT"),
+        ("org.gnome.shell.extensions.dash-to-dock", "dash-max-icon-size", 38, 48),
+        ("org.gnome.shell.extensions.dash-to-dock", "autohide", True, False),
         # Compositor
-        ("org.gnome.mutter", "center-new-windows", False),
+        ("org.gnome.mutter", "center-new-windows", False, False),
     ]
 
     def add_display_page(self):
@@ -128,18 +130,18 @@ class KySettings(Adw.Application):
         page.set_icon_name("video-display-symbolic")
         page.set_title("Display")
 
-        # Restore My Settings group
-        restore_group = Adw.PreferencesGroup()
-        restore_group.set_title("Restore My Settings")
-        restore_group.set_description("One-click appearance restore after fresh install")
+        # Desktop Settings group
+        desktop_group = Adw.PreferencesGroup()
+        desktop_group.set_title("Desktop")
+        desktop_group.set_description("Theme, wallpaper, fonts, and dock")
 
-        restore_row = Adw.SwitchRow()
-        restore_row.set_title("Restore My Settings")
-        restore_row.set_subtitle("Apply theme, wallpaper, fonts, and dock settings")
-        restore_row.set_active(False)
-        restore_row.connect("notify::active", self.on_restore_settings)
-        restore_group.add(restore_row)
-        page.add(restore_group)
+        desktop_row = Adw.SwitchRow()
+        desktop_row.set_title("Kyle's Desktop")
+        desktop_row.set_subtitle("ON = Kyle's settings / OFF = Ubuntu defaults")
+        desktop_row.set_active(self._detect_kyle_desktop())
+        desktop_row.connect("notify::active", self.on_desktop_toggle)
+        desktop_group.add(desktop_row)
+        page.add(desktop_group)
 
         # Screen Off group
         group = Adw.PreferencesGroup()
@@ -256,14 +258,26 @@ class KySettings(Adw.Application):
         except Exception as e:
             print(f"Error toggling pin: {e}")
 
-    def on_restore_settings(self, row, _pspec):
-        """Apply Kyle's preferred appearance settings (one-shot toggle)."""
-        if not row.get_active():
-            return
+    def _detect_kyle_desktop(self):
+        """Check if current desktop matches Kyle's settings (by gtk-theme)."""
+        try:
+            s = Gio.Settings.new("org.gnome.desktop.interface")
+            return s.get_string("gtk-theme") == "Yaru-sage-dark"
+        except Exception:
+            return False
 
+    def on_desktop_toggle(self, row, _pspec):
+        """Toggle between Kyle's desktop settings and Ubuntu defaults."""
+        if self._initializing:
+            return
+        use_kyle = row.get_active()
+        # Index 2 = kyle_value, index 3 = ubuntu_default
+        idx = 2 if use_kyle else 3
         applied = 0
         errors = []
-        for schema, key, value in self.RESTORE_SETTINGS:
+        for entry in self.DESKTOP_SETTINGS:
+            schema, key, kyle_val, default_val = entry
+            value = kyle_val if use_kyle else default_val
             try:
                 s = Gio.Settings.new(schema)
                 if isinstance(value, bool):
@@ -276,22 +290,19 @@ class KySettings(Adw.Application):
             except Exception as e:
                 errors.append(f"{schema}.{key}: {e}")
 
-        # Show result dialog
+        label = "Kyle's settings" if use_kyle else "Ubuntu defaults"
         if errors:
-            body = f"Applied {applied} settings.\n{len(errors)} failed:\n" + "\n".join(errors[:5])
+            body = f"Applied {applied} {label}.\n{len(errors)} failed:\n" + "\n".join(errors[:5])
         else:
-            body = f"All {applied} settings applied successfully."
+            body = f"{label} applied ({applied} settings)."
 
         dialog = Adw.MessageDialog(
             transient_for=self.win,
-            heading="Settings Restored",
+            heading="Desktop Updated",
             body=body,
         )
         dialog.add_response("ok", "OK")
         dialog.present()
-
-        # Reset toggle to off (one-shot action)
-        row.set_active(False)
 
     def is_mc_mute_installed(self):
         """Check if minecraft-auto-mute script and deps are installed."""
