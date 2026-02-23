@@ -103,13 +103,13 @@ class KySettings(Adw.Application):
         page.set_icon_name("video-display-symbolic")
         page.set_title("Display")
 
-        # Screen Blank group
+        # Screen Off group
         group = Adw.PreferencesGroup()
-        group.set_title("Screen Blank")
-        group.set_description("Extended timeout options")
+        group.set_title("Screen Off")
+        group.set_description("Monitor power off timeout")
 
         row = Adw.ComboRow()
-        row.set_title("Blank Screen After")
+        row.set_title("Turn Off Monitor After")
 
         self.blank_options = [
             ("Never", 0),
@@ -141,6 +141,10 @@ class KySettings(Adw.Application):
 
         row.connect("notify::selected", self.on_blank_changed)
         group.add(row)
+
+        # Apply DPMS monitor-off on startup to match current setting
+        self._set_monitor_off(current)
+
         page.add(group)
 
         # Application group
@@ -255,7 +259,7 @@ class KySettings(Adw.Application):
 MINECRAFT_MUTED=false
 
 get_minecraft_stream_id() {
-    wpctl status | grep -A1 "Streams:" | grep -E "^\\s+[0-9]+\\. java" | awk '{print $1}' | tr -d '.'
+    wpctl status | sed -n '/Streams:/,/^$/p' | grep -E "^\\s+[0-9]+\\. java" | head -1 | awk '{print $1}' | tr -d '.'
 }
 
 mute_minecraft() {
@@ -633,8 +637,34 @@ done
             pass
 
     def on_blank_changed(self, row, _):
+        if self._initializing:
+            return
         _, seconds = self.blank_options[row.get_selected()]
+        # Set GNOME idle-delay (controls when screen action triggers)
         Gio.Settings.new("org.gnome.desktop.session").set_uint("idle-delay", seconds)
+        # Use DPMS to power off the monitor (not just blank)
+        self._set_monitor_off(seconds)
+
+    def _set_monitor_off(self, seconds):
+        """Configure DPMS to turn monitor OFF instead of just blanking."""
+        # Disable screensaver blanking — we want DPMS power off instead
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.screensaver", "idle-activation-enabled", "false"],
+            capture_output=True, timeout=5
+        )
+        # Disable idle dimming
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.settings-daemon.plugins.power", "idle-dim", "false"],
+            capture_output=True, timeout=5
+        )
+        if seconds == 0:
+            # "Never" — disable DPMS entirely
+            subprocess.run(["xset", "dpms", "0", "0", "0"], capture_output=True, timeout=5)
+            subprocess.run(["xset", "-dpms"], capture_output=True, timeout=5)
+        else:
+            # Set DPMS: no standby, no suspend, off after <seconds>
+            subprocess.run(["xset", "dpms", "0", "0", str(seconds)], capture_output=True, timeout=5)
+            subprocess.run(["xset", "+dpms"], capture_output=True, timeout=5)
 
     def add_keyboard_page(self):
         page = Adw.PreferencesPage()

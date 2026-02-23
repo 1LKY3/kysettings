@@ -6,7 +6,8 @@ MINECRAFT_MUTED=false
 
 get_minecraft_stream_id() {
     # Find java/Minecraft stream ID from wpctl
-    wpctl status | grep -A1 "Streams:" | grep -E "^\s+[0-9]+\. java" | awk '{print $1}' | tr -d '.'
+    # Use sed to grab everything after "Streams:" then match the java line
+    wpctl status | sed -n '/Streams:/,/^$/p' | grep -E "^\s+[0-9]+\. java" | head -1 | awk '{print $1}' | tr -d '.'
 }
 
 mute_minecraft() {
