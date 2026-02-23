@@ -1,0 +1,22 @@
+#!/bin/bash
+# Bluetooth adapter reset: power cycle + service restart + scan + reconnect
+# Run with pkexec (needs root for systemctl restart bluetooth)
+
+rfkill unblock bluetooth 2>/dev/null
+systemctl restart bluetooth
+sleep 2
+
+bluetoothctl power on
+sleep 1
+
+# Scan for 10 seconds
+bluetoothctl scan on &
+SCAN_PID=$!
+sleep 10
+kill $SCAN_PID 2>/dev/null
+
+# Reconnect paired devices
+bluetoothctl devices Paired | while read -r _ MAC NAME; do
+    bluetoothctl connect "$MAC" 2>/dev/null &
+done
+wait

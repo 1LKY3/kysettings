@@ -4,7 +4,7 @@ set -e
 echo "=== KySettings Installer ==="
 
 # All dependencies — install everything upfront so nothing needs internet later
-ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks)
+ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks xdotool xclip)
 MISSING=()
 for pkg in "${ALL_DEPS[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then
@@ -41,6 +41,15 @@ chmod +x ~/.local/bin/minecraft-auto-mute.sh
 
 cp scripts/speech-lock ~/.local/bin/speech-lock
 chmod +x ~/.local/bin/speech-lock
+
+cp scripts/bt-reset ~/.local/bin/bt-reset
+chmod +x ~/.local/bin/bt-reset
+
+# Ensure ~/.local/bin is in PATH
+if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    export PATH="$HOME/.local/bin:$PATH"
+fi
 
 # Install icon
 mkdir -p ~/.local/share/icons/hicolor/256x256/apps
