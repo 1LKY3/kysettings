@@ -149,6 +149,16 @@ class KySettings(Adw.Application):
         hide_bar_row.connect("notify::active", self.on_hide_top_bar_toggle)
         desktop_group.add(hide_bar_row)
 
+        logout_row = Adw.ActionRow()
+        logout_row.set_title("Restart Session")
+        logout_row.set_subtitle("Log out and back in to apply extension changes")
+        logout_btn = Gtk.Button(label="Log Out")
+        logout_btn.set_valign(Gtk.Align.CENTER)
+        logout_btn.add_css_class("destructive-action")
+        logout_btn.connect("clicked", self.on_restart_session)
+        logout_row.add_suffix(logout_btn)
+        desktop_group.add(logout_row)
+
         page.add(desktop_group)
 
         # Screen Off group
@@ -313,7 +323,35 @@ class KySettings(Adw.Application):
         dialog.present()
 
     HIDE_TOP_BAR_UUID = "hidetopbar@mathieu.bidon.ca"
-    HIDE_TOP_BAR_URL = "https://extensions.gnome.org/download-extension/hidetopbar@mathieu.bidon.ca.shell-extension.zip?version_tag=65453"
+
+    def on_restart_session(self, button):
+        """Log out with confirmation dialog."""
+        dialog = Adw.MessageDialog(
+            transient_for=self.win,
+            heading="Log Out?",
+            body="This will end your session. Unsaved work will be lost.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("logout", "Log Out")
+        dialog.set_response_appearance("logout", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.connect("response", self._on_logout_response)
+        dialog.present()
+
+    def _on_logout_response(self, dialog, response):
+        if response == "logout":
+            subprocess.Popen(["gnome-session-quit", "--no-prompt"])
+
+    def _is_hide_top_bar_enabled(self):
+        """Check if Hide Top Bar extension is installed and active."""
+        try:
+            result = subprocess.run(
+                ["gnome-extensions", "info", self.HIDE_TOP_BAR_UUID],
+                capture_output=True, text=True, timeout=5
+            )
+            return "State: ACTIVE" in result.stdout or "State: ENABLED" in result.stdout
+        except Exception:
+            return False
 
     def _is_hide_top_bar_installed(self):
         """Check if Hide Top Bar extension is installed."""
@@ -326,31 +364,20 @@ class KySettings(Adw.Application):
         except Exception:
             return False
 
-    def _is_hide_top_bar_enabled(self):
-        """Check if Hide Top Bar extension is enabled."""
+    def _install_hide_top_bar_via_dbus(self):
+        """Install Hide Top Bar via GNOME Shell dbus (triggers scan + enable)."""
         try:
-            result = subprocess.run(
-                ["gnome-extensions", "info", self.HIDE_TOP_BAR_UUID],
-                capture_output=True, text=True, timeout=5
+            subprocess.run(
+                ["gdbus", "call", "--session",
+                 "--dest", "org.gnome.Shell.Extensions",
+                 "--object-path", "/org/gnome/Shell/Extensions",
+                 "--method", "org.gnome.Shell.Extensions.InstallRemoteExtension",
+                 self.HIDE_TOP_BAR_UUID],
+                capture_output=True, timeout=15
             )
-            return "State: ACTIVE" in result.stdout or "State: ENABLED" in result.stdout
-        except Exception:
-            return False
-
-    def _install_hide_top_bar(self):
-        """Download and install the Hide Top Bar extension."""
-        import tempfile, urllib.request, zipfile
-        ext_dir = os.path.expanduser(f"~/.local/share/gnome-shell/extensions/{self.HIDE_TOP_BAR_UUID}")
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                urllib.request.urlretrieve(self.HIDE_TOP_BAR_URL, tmp.name)
-                os.makedirs(ext_dir, exist_ok=True)
-                with zipfile.ZipFile(tmp.name, 'r') as z:
-                    z.extractall(ext_dir)
-                os.unlink(tmp.name)
             return True
         except Exception as e:
-            print(f"Failed to install Hide Top Bar: {e}")
+            print(f"Failed to install Hide Top Bar via dbus: {e}")
             return False
 
     def on_hide_top_bar_toggle(self, row, _pspec):
@@ -358,13 +385,16 @@ class KySettings(Adw.Application):
         if self._initializing:
             return
         enable = row.get_active()
+
         if enable and not self._is_hide_top_bar_installed():
             row.set_subtitle("Installing extension...")
-            if not self._install_hide_top_bar():
+            if not self._install_hide_top_bar_via_dbus():
                 row.set_subtitle("Install failed — check internet connection")
                 row.set_active(False)
                 return
+            # dbus install auto-enables, so we're done
             row.set_subtitle("Auto-hide the GNOME top bar")
+            return
 
         action = "enable" if enable else "disable"
         try:
@@ -375,6 +405,7 @@ class KySettings(Adw.Application):
         except Exception as e:
             print(f"Failed to {action} Hide Top Bar: {e}")
             row.set_active(not enable)
+        row.set_subtitle("Auto-hide the GNOME top bar")
 
     def is_mc_mute_installed(self):
         """Check if minecraft-auto-mute script and deps are installed."""
