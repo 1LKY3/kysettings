@@ -141,6 +141,14 @@ class KySettings(Adw.Application):
         desktop_row.set_active(self._detect_kyle_desktop())
         desktop_row.connect("notify::active", self.on_desktop_toggle)
         desktop_group.add(desktop_row)
+
+        hide_bar_row = Adw.SwitchRow()
+        hide_bar_row.set_title("Hide Top Bar")
+        hide_bar_row.set_subtitle("Auto-hide the GNOME top bar")
+        hide_bar_row.set_active(self._is_hide_top_bar_enabled())
+        hide_bar_row.connect("notify::active", self.on_hide_top_bar_toggle)
+        desktop_group.add(hide_bar_row)
+
         page.add(desktop_group)
 
         # Screen Off group
@@ -303,6 +311,70 @@ class KySettings(Adw.Application):
         )
         dialog.add_response("ok", "OK")
         dialog.present()
+
+    HIDE_TOP_BAR_UUID = "hidetopbar@mathieu.bidon.ca"
+    HIDE_TOP_BAR_URL = "https://extensions.gnome.org/download-extension/hidetopbar@mathieu.bidon.ca.shell-extension.zip?version_tag=65453"
+
+    def _is_hide_top_bar_installed(self):
+        """Check if Hide Top Bar extension is installed."""
+        try:
+            result = subprocess.run(
+                ["gnome-extensions", "info", self.HIDE_TOP_BAR_UUID],
+                capture_output=True, text=True, timeout=5
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _is_hide_top_bar_enabled(self):
+        """Check if Hide Top Bar extension is enabled."""
+        try:
+            result = subprocess.run(
+                ["gnome-extensions", "info", self.HIDE_TOP_BAR_UUID],
+                capture_output=True, text=True, timeout=5
+            )
+            return "State: ACTIVE" in result.stdout or "State: ENABLED" in result.stdout
+        except Exception:
+            return False
+
+    def _install_hide_top_bar(self):
+        """Download and install the Hide Top Bar extension."""
+        import tempfile, urllib.request, zipfile
+        ext_dir = os.path.expanduser(f"~/.local/share/gnome-shell/extensions/{self.HIDE_TOP_BAR_UUID}")
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                urllib.request.urlretrieve(self.HIDE_TOP_BAR_URL, tmp.name)
+                os.makedirs(ext_dir, exist_ok=True)
+                with zipfile.ZipFile(tmp.name, 'r') as z:
+                    z.extractall(ext_dir)
+                os.unlink(tmp.name)
+            return True
+        except Exception as e:
+            print(f"Failed to install Hide Top Bar: {e}")
+            return False
+
+    def on_hide_top_bar_toggle(self, row, _pspec):
+        """Enable or disable the Hide Top Bar extension."""
+        if self._initializing:
+            return
+        enable = row.get_active()
+        if enable and not self._is_hide_top_bar_installed():
+            row.set_subtitle("Installing extension...")
+            if not self._install_hide_top_bar():
+                row.set_subtitle("Install failed — check internet connection")
+                row.set_active(False)
+                return
+            row.set_subtitle("Auto-hide the GNOME top bar")
+
+        action = "enable" if enable else "disable"
+        try:
+            subprocess.run(
+                ["gnome-extensions", action, self.HIDE_TOP_BAR_UUID],
+                capture_output=True, timeout=5
+            )
+        except Exception as e:
+            print(f"Failed to {action} Hide Top Bar: {e}")
+            row.set_active(not enable)
 
     def is_mc_mute_installed(self):
         """Check if minecraft-auto-mute script and deps are installed."""
