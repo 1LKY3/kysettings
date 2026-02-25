@@ -1242,7 +1242,7 @@ done
         if row.get_active():
             self.add_keybinding(
                 "ky-insert-date",
-                "bash -c 'wl-copy \"$(date +%F\\ %T)\" && sleep 0.2 && ydotool key ctrl+v'",
+                "bash -c 'ydotool type --delay 200 \"$(date +\"%F %T\")\"'",
                 "<Control><Alt>period"
             )
         else:

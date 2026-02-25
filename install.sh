@@ -4,7 +4,7 @@ set -e
 echo "=== KySettings Installer ==="
 
 # All dependencies — install everything upfront so nothing needs internet later
-ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks xdotool xclip ydotool wl-clipboard)
+ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks xdotool xclip ydotool)
 MISSING=()
 for pkg in "${ALL_DEPS[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then
