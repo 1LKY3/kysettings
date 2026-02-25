@@ -875,6 +875,15 @@ done
         row.connect("notify::active", self.on_date_toggle)
 
         group.add(row)
+
+        # Screenshot toggle
+        ss_row = Adw.SwitchRow()
+        ss_row.set_title("Screenshot")
+        ss_row.set_subtitle("Super + Shift + S takes a screenshot (Windows-style)")
+        ss_row.set_active(self.has_keybinding("ky-screenshot"))
+        ss_row.connect("notify::active", self.on_screenshot_toggle)
+        group.add(ss_row)
+
         page.add(group)
 
         # Speech to Text group
@@ -1246,11 +1255,21 @@ done
 
             self.add_keybinding(
                 "ky-insert-date",
-                'bash -c "sleep 0.2 && xdotool type --clearmodifiers \\"$(date +\'%F %T\')\\""',
+                "bash -c 'sleep 0.2 && xdotool type --clearmodifiers \"$(date +\"%F %T\")\"'",
                 "<Control><Alt>period"
             )
         else:
             self.remove_keybinding("ky-insert-date")
+
+    def on_screenshot_toggle(self, row, _):
+        if row.get_active():
+            self.add_keybinding(
+                "ky-screenshot",
+                "gnome-screenshot --area",
+                "<Shift><Super>s"
+            )
+        else:
+            self.remove_keybinding("ky-screenshot")
 
     # === SPEECH TO TEXT FUNCTIONS ===
     def is_speech_note_installed(self):
