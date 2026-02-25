@@ -880,7 +880,8 @@ done
         ss_row = Adw.SwitchRow()
         ss_row.set_title("Screenshot")
         ss_row.set_subtitle("Super + Shift + S takes a screenshot (Windows-style)")
-        ss_row.set_active(self.has_keybinding("ky-screenshot"))
+        ss_row.set_active("<Shift><Super>s" in
+            Gio.Settings.new("org.gnome.shell.keybindings").get_strv("show-screenshot-ui"))
         ss_row.connect("notify::active", self.on_screenshot_toggle)
         group.add(ss_row)
 
@@ -1262,14 +1263,16 @@ done
             self.remove_keybinding("ky-insert-date")
 
     def on_screenshot_toggle(self, row, _):
+        settings = Gio.Settings.new("org.gnome.shell.keybindings")
+        bindings = settings.get_strv("show-screenshot-ui")
         if row.get_active():
-            self.add_keybinding(
-                "ky-screenshot",
-                "gnome-screenshot --area",
-                "<Shift><Super>s"
-            )
+            if "<Shift><Super>s" not in bindings:
+                bindings.append("<Shift><Super>s")
+                settings.set_strv("show-screenshot-ui", bindings)
         else:
-            self.remove_keybinding("ky-screenshot")
+            if "<Shift><Super>s" in bindings:
+                bindings.remove("<Shift><Super>s")
+                settings.set_strv("show-screenshot-ui", bindings)
 
     # === SPEECH TO TEXT FUNCTIONS ===
     def is_speech_note_installed(self):
