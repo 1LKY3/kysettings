@@ -4,7 +4,7 @@ set -e
 echo "=== KySettings Installer ==="
 
 # All dependencies — install everything upfront so nothing needs internet later
-ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks xdotool xclip ydotool)
+ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks xdotool xclip wl-clipboard)
 MISSING=()
 for pkg in "${ALL_DEPS[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then
@@ -15,17 +15,6 @@ done
 if [ ${#MISSING[@]} -gt 0 ]; then
     echo "Installing dependencies: ${MISSING[*]}"
     sudo apt install -y "${MISSING[@]}"
-fi
-
-# Set up uinput permissions for ydotool (Wayland keyboard simulation)
-if ! groups "$USER" | grep -q '\binput\b'; then
-    sudo usermod -aG input "$USER"
-    echo "Added $USER to input group (log out/in to take effect)"
-fi
-if [ ! -f /etc/udev/rules.d/99-uinput.rules ]; then
-    echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-uinput.rules >/dev/null
-    sudo udevadm control --reload-rules
-    sudo udevadm trigger
 fi
 
 # Disable default redsocks service (we manage our own instance)

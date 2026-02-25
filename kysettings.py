@@ -868,7 +868,7 @@ done
         # Type Date toggle
         row = Adw.SwitchRow()
         row.set_title("Type Date")
-        row.set_subtitle("Ctrl + Alt + . inserts YYYY-MM-DD HH:MM:SS")
+        row.set_subtitle("Ctrl + Alt + . copies YYYY-MM-DD HH:MM:SS to clipboard")
 
         # Check if keybinding exists
         row.set_active(self.has_keybinding("ky-insert-date"))
@@ -1242,7 +1242,7 @@ done
         if row.get_active():
             self.add_keybinding(
                 "ky-insert-date",
-                "bash -c 'ydotool type --delay 200 \"$(date +\"%F %T\")\"'",
+                "bash -c 'wl-copy \"$(date +\"%F %T\")\"'",
                 "<Control><Alt>period"
             )
         else:
