@@ -1239,15 +1239,15 @@ done
 
     def on_date_toggle(self, row, _):
         if row.get_active():
-            # Check if xdotool is installed
+            # Check if wtype is installed (Wayland equivalent of xdotool)
             try:
-                subprocess.run(["which", "xdotool"], check=True, capture_output=True)
+                subprocess.run(["which", "wtype"], check=True, capture_output=True)
             except subprocess.CalledProcessError:
                 row.set_active(False)
                 dialog = Adw.MessageDialog(
                     transient_for=self.win,
                     heading="Missing Dependency",
-                    body="Please install xdotool:\nsudo apt install xdotool"
+                    body="Please install wtype:\nsudo apt install wtype"
                 )
                 dialog.add_response("ok", "OK")
                 dialog.present()
@@ -1255,7 +1255,7 @@ done
 
             self.add_keybinding(
                 "ky-insert-date",
-                "bash -c 'sleep 0.2 && xdotool type --clearmodifiers \"$(date +\"%F %T\")\"'",
+                "bash -c 'sleep 0.2 && wtype \"$(date +\"%F %T\")\"'",
                 "<Control><Alt>period"
             )
         else:
