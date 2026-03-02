@@ -128,7 +128,6 @@ class KySettings(Adw.Application):
 
     def add_display_page(self):
         page = Adw.PreferencesPage()
-        page.set_icon_name("video-display-symbolic")
         page.set_title("Display")
 
         # Desktop Settings group
@@ -532,7 +531,6 @@ done
 
     def add_effects_page(self):
         page = Adw.PreferencesPage()
-        page.set_icon_name("view-conceal-symbolic")
         page.set_title("Effects")
 
         bms_installed = self._is_blur_my_shell_installed()
@@ -723,7 +721,6 @@ done
 
     def add_wireless_page(self):
         page = Adw.PreferencesPage()
-        page.set_icon_name("network-wireless-symbolic")
         page.set_title("Wireless")
 
         # Bluetooth group
@@ -1053,7 +1050,6 @@ done
 
     def add_keyboard_page(self):
         page = Adw.PreferencesPage()
-        page.set_icon_name("input-keyboard-symbolic")
         page.set_title("Keyboard")
 
         # Shortcuts group
@@ -1132,7 +1128,6 @@ done
 
     def add_timers_page(self):
         page = Adw.PreferencesPage()
-        page.set_icon_name("alarm-symbolic")
         page.set_title("Timers")
 
         # === ALARM ===
