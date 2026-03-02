@@ -52,6 +52,7 @@ class KySettings(Adw.Application):
 
         # Add pages
         self.add_display_page()
+        self.add_effects_page()
         self.add_wireless_page()
         self.add_keyboard_page()
         self.add_timers_page()
@@ -524,6 +525,201 @@ done
             )
         else:
             subprocess.run(["pkill", "-f", "minecraft-auto-mute"], capture_output=True)
+
+    # =========================================================================
+    # EFFECTS PAGE
+    # =========================================================================
+
+    def add_effects_page(self):
+        page = Adw.PreferencesPage()
+        page.set_icon_name("view-conceal-symbolic")
+        page.set_title("Effects")
+
+        bms_installed = self._is_blur_my_shell_installed()
+
+        # ── Group: Blur my Shell ─────────────────────────────────────────────
+        bms_group = Adw.PreferencesGroup()
+        bms_group.set_title("Blur my Shell")
+        bms_group.set_description("Open-source GNOME extension for frosted glass effects")
+
+        bms_row = Adw.ActionRow()
+        bms_row.set_title("Extension Status")
+        if bms_installed:
+            bms_row.set_subtitle("Installed and active")
+            ok_icon = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+            ok_icon.add_css_class("success")
+            ok_icon.set_valign(Gtk.Align.CENTER)
+            bms_row.add_suffix(ok_icon)
+        else:
+            bms_row.set_subtitle("Required for effects — installs via pip + gnome-extensions")
+            self.bms_install_btn = Gtk.Button(label="Install")
+            self.bms_install_btn.set_valign(Gtk.Align.CENTER)
+            self.bms_install_btn.add_css_class("suggested-action")
+            self.bms_install_btn.connect("clicked", self.on_blur_my_shell_install)
+            bms_row.add_suffix(self.bms_install_btn)
+        bms_group.add(bms_row)
+        page.add(bms_group)
+
+        # ── Group: Application Windows ───────────────────────────────────────
+        app_group = Adw.PreferencesGroup()
+        app_group.set_title("Application Windows")
+        app_group.set_description("Blur and transparency for all open windows")
+        app_group.set_sensitive(bms_installed)
+
+        app_blur_row = Adw.SwitchRow()
+        app_blur_row.set_title("Enable Window Effects")
+        app_blur_row.set_subtitle("Apply blur and transparency to all app windows")
+        app_blur_row.set_active(self._bms_get_bool("applications", "blur"))
+        app_blur_row.connect("notify::active", self.on_app_effects_toggle)
+        app_group.add(app_blur_row)
+
+        # Blur amount slider
+        blur_row = Adw.ActionRow()
+        blur_row.set_title("Blur Amount")
+        blur_row.set_subtitle("Radius of the frosted glass blur")
+        blur_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 50, 1)
+        blur_scale.set_value(self._bms_get_int("applications", "sigma"))
+        blur_scale.set_size_request(220, -1)
+        blur_scale.set_valign(Gtk.Align.CENTER)
+        blur_scale.set_draw_value(True)
+        blur_scale.add_mark(0,  Gtk.PositionType.BOTTOM, "Off")
+        blur_scale.add_mark(50, Gtk.PositionType.BOTTOM, "Max")
+        blur_scale.connect("value-changed", self.on_blur_sigma_changed)
+        blur_row.add_suffix(blur_scale)
+        app_group.add(blur_row)
+
+        # Transparency slider
+        trans_row = Adw.ActionRow()
+        trans_row.set_title("Transparency")
+        trans_row.set_subtitle("How see-through windows appear")
+        trans_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        opacity_raw = self._bms_get_int("applications", "opacity")
+        trans_scale.set_value(round((255 - opacity_raw) / 255 * 100))
+        trans_scale.set_size_request(220, -1)
+        trans_scale.set_valign(Gtk.Align.CENTER)
+        trans_scale.set_draw_value(True)
+        trans_scale.set_format_value_func(lambda _, v: f"{int(v)}%")
+        trans_scale.add_mark(0,   Gtk.PositionType.BOTTOM, "Solid")
+        trans_scale.add_mark(100, Gtk.PositionType.BOTTOM, "Clear")
+        trans_scale.connect("value-changed", self.on_transparency_changed)
+        trans_row.add_suffix(trans_scale)
+        app_group.add(trans_row)
+
+        page.add(app_group)
+
+        # ── Group: Panel & Overview ──────────────────────────────────────────
+        panel_group = Adw.PreferencesGroup()
+        panel_group.set_title("Panel and Overview")
+        panel_group.set_description("Blur effects for the top bar and activities overview")
+        panel_group.set_sensitive(bms_installed)
+
+        panel_row = Adw.SwitchRow()
+        panel_row.set_title("Blur Top Bar")
+        panel_row.set_subtitle("Frosted glass on the GNOME top bar")
+        panel_row.set_active(self._bms_get_bool("panel", "blur"))
+        panel_row.connect("notify::active", self.on_panel_blur_toggle)
+        panel_group.add(panel_row)
+
+        overview_row = Adw.SwitchRow()
+        overview_row.set_title("Blur Overview")
+        overview_row.set_subtitle("Blur the desktop when pressing Super")
+        overview_row.set_active(self._bms_get_bool("overview", "blur"))
+        overview_row.connect("notify::active", self.on_overview_blur_toggle)
+        panel_group.add(overview_row)
+
+        page.add(panel_group)
+
+        self.stack.add_titled(page, "effects", "Effects")
+
+    # ── Blur my Shell helpers ─────────────────────────────────────────────────
+
+    def _is_blur_my_shell_installed(self):
+        try:
+            result = subprocess.run(
+                ["gnome-extensions", "list"],
+                capture_output=True, text=True, timeout=5
+            )
+            return "blur-my-shell@aunetx" in result.stdout
+        except Exception:
+            return False
+
+    def _bms_schema(self, sub):
+        """Return a Settings object for a BMS sub-schema, or None if not installed."""
+        schema_id = f"org.gnome.shell.extensions.blur-my-shell.{sub}"
+        source = Gio.SettingsSchemaSource.get_default()
+        if source and source.lookup(schema_id, True):
+            return Gio.Settings.new(schema_id)
+        return None
+
+    def _bms_get_bool(self, sub, key):
+        s = self._bms_schema(sub)
+        return s.get_boolean(key) if s else False
+
+    def _bms_get_int(self, sub, key):
+        s = self._bms_schema(sub)
+        return s.get_int(key) if s else 0
+
+    def _bms_set_bool(self, sub, key, value):
+        s = self._bms_schema(sub)
+        if s:
+            s.set_boolean(key, value)
+
+    def _bms_set_int(self, sub, key, value):
+        s = self._bms_schema(sub)
+        if s:
+            s.set_int(key, value)
+
+    # ── Effects event handlers ────────────────────────────────────────────────
+
+    def on_app_effects_toggle(self, row, _):
+        self._bms_set_bool("applications", "blur", row.get_active())
+
+    def on_blur_sigma_changed(self, scale):
+        self._bms_set_int("applications", "sigma", int(scale.get_value()))
+
+    def on_transparency_changed(self, scale):
+        opacity = round((100 - scale.get_value()) / 100 * 255)
+        self._bms_set_int("applications", "opacity", opacity)
+
+    def on_panel_blur_toggle(self, row, _):
+        self._bms_set_bool("panel", "blur", row.get_active())
+
+    def on_overview_blur_toggle(self, row, _):
+        self._bms_set_bool("overview", "blur", row.get_active())
+
+    def on_blur_my_shell_install(self, button):
+        button.set_sensitive(False)
+        button.set_label("Installing…")
+        import threading
+        threading.Thread(target=self._install_blur_my_shell, daemon=True).start()
+
+    def _install_blur_my_shell(self):
+        import shutil
+        try:
+            # Install gnome-extensions-cli (provides `gext`) if not present
+            if not shutil.which("gext") and not os.path.exists(os.path.expanduser("~/.local/bin/gext")):
+                subprocess.run(
+                    ["pip3", "install", "--user", "--quiet", "gnome-extensions-cli"],
+                    capture_output=True, timeout=90
+                )
+            gext = shutil.which("gext") or os.path.expanduser("~/.local/bin/gext")
+            subprocess.run([gext, "install", "blur-my-shell@aunetx"],
+                           capture_output=True, timeout=90)
+            subprocess.run(["gnome-extensions", "enable", "blur-my-shell@aunetx"],
+                           capture_output=True, timeout=10)
+            success = self._is_blur_my_shell_installed()
+        except Exception:
+            success = False
+        GLib.idle_add(self._blur_install_done, success)
+
+    def _blur_install_done(self, success):
+        if success:
+            self.bms_install_btn.set_label("Installed — log out to activate")
+            self.bms_install_btn.add_css_class("success")
+        else:
+            self.bms_install_btn.set_label("Install")
+            self.bms_install_btn.set_sensitive(True)
+        return False
 
     def add_wireless_page(self):
         page = Adw.PreferencesPage()
