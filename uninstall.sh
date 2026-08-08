@@ -29,6 +29,8 @@ sudo rm -f /etc/apt/apt.conf.d/99pdanet-proxy 2>/dev/null || true
 rm -f ~/.local/bin/kysettings
 rm -f ~/.local/bin/pdanet-proxy
 rm -f ~/.local/bin/pdanet
+pkill -f game-auto-mute 2>/dev/null || true
+rm -f ~/.local/bin/game-auto-mute.py
 pkill -f minecraft-auto-mute 2>/dev/null || true
 rm -f ~/.local/bin/minecraft-auto-mute.sh
 pkill -f speech-lock 2>/dev/null || true

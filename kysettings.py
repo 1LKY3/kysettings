@@ -4,13 +4,422 @@
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gio, GLib
+from gi.repository import Gtk, Adw, Gdk, Gio, GLib
 import subprocess
+import fcntl
+import json
 import os
+import signal
 import pathlib
 from datetime import datetime, timedelta
 
 FIRST_RUN_FLAG = pathlib.Path.home() / ".config" / "kysettings" / ".installed"
+SS_CLEANUP_FLAG = pathlib.Path.home() / ".config" / "kysettings" / ".ss_cleanup"
+WINDOW_STATE = pathlib.Path.home() / ".config" / "kysettings" / "window.json"
+GAME_MUTE_SCRIPT = os.path.expanduser("~/.local/bin/game-auto-mute.py")
+GAME_MUTE_AUTOSTART = pathlib.Path.home() / ".config" / "autostart" / "game-auto-mute.desktop"
+GAME_MUTE_LOCK = pathlib.Path.home() / ".config" / "kysettings" / "game-auto-mute.lock"
+
+# Written verbatim by the in-app Install button. Keep in sync with
+# scripts/game-auto-mute, which install.sh copies into ~/.local/bin.
+GAME_MUTE_SCRIPT_SOURCE = r'''#!/usr/bin/env python3
+"""Auto-mute games when their window loses focus.
+
+Watches _NET_ACTIVE_WINDOW (Xwayland/X11) and mutes every PipeWire output
+stream that belongs to a game process which does not own the focused window.
+Only streams this script muted are ever unmuted again, so a manual mute is
+never undone. On exit everything it muted is restored.
+
+Extra detection markers (one lowercase substring per line, matched against a
+process's cmdline) can be added in ~/.config/kysettings/game-mute-markers.txt
+"""
+
+import fcntl
+import json
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import pathlib
+
+POLL_INTERVAL = 2.0  # re-scan even without a focus change, to catch new streams
+MAX_ANCESTRY = 12
+
+CONFIG_DIR = pathlib.Path.home() / ".config" / "kysettings"
+EXTRA_MARKERS_FILE = CONFIG_DIR / "game-mute-markers.txt"
+LOCK_FILE = CONFIG_DIR / "game-auto-mute.lock"
+
+# A process is a game if any of these appear in its cmdline or an ancestor's.
+GAME_MARKERS = (
+    "/steamapps/",          # anything Steam actually installed
+    "steamlaunch appid=",   # Steam's reaper wrapper
+    "wine64-preloader",
+    "wine-preloader",
+    "wineserver",
+    "/proton",
+    "proton_dist",
+    "lutris",
+    "heroic",
+    "bottles",
+    "legendary",
+    "prismlauncher",
+    "multimc",
+    "atlauncher",
+    "minecraft",
+)
+
+# Never treat these as games even if a marker matches somewhere.
+BINARY_DENYLIST = {
+    "steam",
+    "steamwebhelper",
+    "steamerrorreporter",
+    "pressure-vessel-adverb",
+}
+
+DEBUG = os.environ.get("GAME_AUTO_MUTE_DEBUG") == "1"
+
+
+def log(msg):
+    if DEBUG:
+        print(msg, file=sys.stderr, flush=True)
+
+
+def run(cmd):
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception:
+        return ""
+
+
+def load_markers():
+    markers = list(GAME_MARKERS)
+    try:
+        for line in EXTRA_MARKERS_FILE.read_text().splitlines():
+            line = line.strip().lower()
+            if line and not line.startswith("#"):
+                markers.append(line)
+    except Exception:
+        pass
+    return tuple(markers)
+
+
+MARKERS = load_markers()
+
+
+# --------------------------------------------------------------------------
+# process helpers
+# --------------------------------------------------------------------------
+
+def cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace").lower()
+    except OSError:
+        return ""
+
+
+def binary_name(pid):
+    try:
+        return os.path.basename(os.readlink(f"/proc/{pid}/exe")).lower()
+    except OSError:
+        return ""
+
+
+def parent_of(pid):
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read().decode("utf-8", "replace")
+        # comm can contain spaces/parens, so split after the final ')'
+        return int(data[data.rindex(")") + 1:].split()[1])
+    except (OSError, ValueError):
+        return 0
+
+
+def ancestry(pid):
+    """pid plus its parents, closest first."""
+    chain = []
+    while pid and pid > 1 and len(chain) < MAX_ANCESTRY:
+        chain.append(pid)
+        pid = parent_of(pid)
+    return chain
+
+
+def is_game(pid):
+    if binary_name(pid) in BINARY_DENYLIST:
+        return False
+    for ancestor in ancestry(pid):
+        text = cmdline(ancestor)
+        if any(marker in text for marker in MARKERS):
+            return True
+    return False
+
+
+def same_process_group(a, b):
+    """True if a and b are the same process or one is an ancestor of the other."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return a in ancestry(b) or b in ancestry(a)
+
+
+# --------------------------------------------------------------------------
+# pipewire helpers
+# --------------------------------------------------------------------------
+
+def audio_streams():
+    """[(node_id, pid, name)] for every audio output stream."""
+    try:
+        dump = json.loads(run(["pw-dump"]) or "[]")
+    except json.JSONDecodeError:
+        return []
+
+    streams = []
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        props = (obj.get("info") or {}).get("props") or {}
+        if props.get("media.class") != "Stream/Output/Audio":
+            continue
+        pid = props.get("application.process.id")
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            continue
+        name = props.get("application.name") or props.get("node.name") or str(pid)
+        streams.append((obj["id"], pid, name))
+    return streams
+
+
+def set_mute(node_id, muted):
+    subprocess.run(
+        ["wpctl", "set-mute", str(node_id), "1" if muted else "0"],
+        capture_output=True,
+    )
+
+
+# --------------------------------------------------------------------------
+# focus helpers
+# --------------------------------------------------------------------------
+
+def focused_pid():
+    """PID owning the focused X window, or None (0x0 = a Wayland-native window)."""
+    out = run(["xprop", "-root", "_NET_ACTIVE_WINDOW"])
+    match = re.search(r"(0x[0-9a-fA-F]+)", out)
+    if not match or int(match.group(1), 16) == 0:
+        return None
+    out = run(["xprop", "-id", match.group(1), "_NET_WM_PID"])
+    match = re.search(r"=\s*(\d+)", out)
+    return int(match.group(1)) if match else None
+
+
+# --------------------------------------------------------------------------
+# main
+# --------------------------------------------------------------------------
+
+muted_by_us = set()
+
+
+def restore_all():
+    for node_id in list(muted_by_us):
+        set_mute(node_id, False)
+    muted_by_us.clear()
+
+
+def sync():
+    focus = focused_pid()
+    live = set()
+
+    for node_id, pid, name in audio_streams():
+        if not is_game(pid):
+            continue
+        live.add(node_id)
+        if same_process_group(focus, pid):
+            if node_id in muted_by_us:
+                set_mute(node_id, False)
+                muted_by_us.discard(node_id)
+                log(f"unmute {name} (node {node_id})")
+        elif node_id not in muted_by_us:
+            set_mute(node_id, True)
+            muted_by_us.add(node_id)
+            log(f"mute {name} (node {node_id})")
+
+    # streams that disappeared (game closed) no longer need restoring
+    muted_by_us.intersection_update(live)
+
+
+def acquire_lock():
+    """Single-instance guard. Returns the fd, or None if already running."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    os.truncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def main():
+    if not os.environ.get("DISPLAY"):
+        os.environ["DISPLAY"] = ":0"
+
+    if acquire_lock() is None:
+        log("already running, exiting")
+        return
+
+    def bail(*_):
+        restore_all()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, bail)
+    signal.signal(signal.SIGINT, bail)
+    signal.signal(signal.SIGHUP, bail)
+
+    log(f"game-auto-mute started, {len(MARKERS)} markers")
+    sync()
+
+    spy = subprocess.Popen(
+        ["xprop", "-root", "-spy", "_NET_ACTIVE_WINDOW"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        while spy.poll() is None:
+            ready, _, _ = select.select([spy.stdout], [], [], POLL_INTERVAL)
+            if ready:
+                if not spy.stdout.readline():
+                    break
+            sync()
+    finally:
+        spy.terminate()
+        restore_all()
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+# Fallback only — the real size is whatever the window was last closed at.
+# 1000 wide is the measured natural width of the six-tab view switcher; below
+# that GTK ellipsises the page titles down to "...". 800 tall fits the longest
+# page without scrolling.
+DEFAULT_WINDOW_SIZE = (1000, 800)
+# Restored sizes are clamped up to this so the titles stay readable on open.
+MIN_WINDOW_SIZE = (1000, 700)
+
+
+def load_window_state():
+    """Return (width, height, maximized) from the last session."""
+    try:
+        state = json.loads(WINDOW_STATE.read_text())
+        width = max(int(state["width"]), MIN_WINDOW_SIZE[0])
+        height = max(int(state["height"]), MIN_WINDOW_SIZE[1])
+        return width, height, bool(state.get("maximized", False))
+    except Exception:
+        return DEFAULT_WINDOW_SIZE[0], DEFAULT_WINDOW_SIZE[1], False
+
+
+def save_window_state(win):
+    """Remember the window size so it reopens the way it was left."""
+    try:
+        WINDOW_STATE.parent.mkdir(parents=True, exist_ok=True)
+        width, height = win.get_default_size()
+        WINDOW_STATE.write_text(json.dumps({
+            "width": width,
+            "height": height,
+            "maximized": win.is_maximized(),
+        }))
+    except Exception as e:
+        print(f"Failed to save window size: {e}")
+
+# Mountain palette sampled from the shared K1/K2 Voidflow wallpaper.
+# This provider is process-local: it themes KySettings without changing other
+# GTK applications or replacing Ky's system-wide Yaru configuration.
+MOUNTAIN_CSS = b"""
+@define-color accent_color #A7B5C8;
+@define-color accent_bg_color #5A6679;
+@define-color accent_fg_color #FFFEFB;
+@define-color destructive_color #FF8B7B;
+@define-color destructive_bg_color #9C4F4A;
+@define-color destructive_fg_color #FFFEFB;
+@define-color success_color #A9C5AD;
+@define-color success_bg_color #55725A;
+@define-color success_fg_color #FFFEFB;
+@define-color warning_color #E2C28F;
+@define-color warning_bg_color #806B4C;
+@define-color warning_fg_color #FFFEFB;
+@define-color error_color #FF8B7B;
+@define-color error_bg_color #9C4F4A;
+@define-color error_fg_color #FFFEFB;
+@define-color window_bg_color #0C121E;
+@define-color window_fg_color #FFFDF8;
+@define-color view_bg_color #111824;
+@define-color view_fg_color #FFFDF8;
+@define-color headerbar_bg_color #191E29;
+@define-color headerbar_fg_color #FFFDF8;
+@define-color headerbar_border_color #454E5F;
+@define-color headerbar_backdrop_color #111824;
+@define-color headerbar_shade_color rgba(7, 11, 19, 0.65);
+@define-color card_bg_color #252D3B;
+@define-color card_fg_color #FFFDF8;
+@define-color card_shade_color rgba(7, 11, 19, 0.55);
+@define-color dialog_bg_color #191E29;
+@define-color dialog_fg_color #FFFDF8;
+@define-color popover_bg_color #252D3B;
+@define-color popover_fg_color #FFFDF8;
+@define-color shade_color rgba(7, 11, 19, 0.60);
+@define-color scrollbar_outline_color rgba(7, 11, 19, 0.75);
+
+window.mountain-theme {
+    background-color: #0C121E;
+    color: #FFFDF8;
+}
+
+window.mountain-theme headerbar.mountain-header {
+    background: linear-gradient(to bottom, #252D3B, #191E29);
+    color: #FFFDF8;
+    border-bottom: 1px solid #454E5F;
+}
+
+window.mountain-theme preferencespage,
+window.mountain-theme .mountain-content {
+    background-color: #0C121E;
+    color: #FFFDF8;
+}
+
+window.mountain-theme actionrow,
+window.mountain-theme expanderrow,
+window.mountain-theme row {
+    color: #FFFDF8;
+}
+
+window.mountain-theme button {
+    border-color: alpha(#6E7582, 0.68);
+}
+
+window.mountain-theme button:hover {
+    background-color: alpha(#6E7582, 0.32);
+}
+
+window.mountain-theme switch:checked,
+window.mountain-theme scale highlight,
+window.mountain-theme progressbar progress {
+    background-color: #6E7582;
+}
+
+window.mountain-theme selection,
+window.mountain-theme *:selected {
+    background-color: #5A6679;
+    color: #FFFEFB;
+}
+"""
 
 # Custom keybinding paths
 KEYBINDING_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings"
@@ -37,18 +446,31 @@ class KySettings(Adw.Application):
 
         self._initializing = True
 
+        # Screenshot cleanup loop (every hour)
+        GLib.timeout_add_seconds(3600, self.cleanup_screenshots_loop)
+        # Run once on startup too (after a short delay to not block UI)
+        GLib.timeout_add_seconds(5, self.cleanup_screenshots_loop)
+
     def on_activate(self, app):
+        self.install_mountain_theme()
         self.win = Adw.ApplicationWindow(application=app)
         self.win.set_title("Ky Settings")
-        self.win.set_default_size(500, 500)
+        width, height, maximized = load_window_state()
+        self.win.set_default_size(width, height)
+        if maximized:
+            self.win.maximize()
+        self.win.connect("close-request", self.on_window_close)
+        self.win.add_css_class("mountain-theme")
 
         # Main layout
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         header = Adw.HeaderBar()
+        header.add_css_class("mountain-header")
         box.append(header)
 
         # Stack for multiple pages
         self.stack = Adw.ViewStack()
+        self.stack.add_css_class("mountain-content")
 
         # Add pages
         self.add_display_page()
@@ -56,6 +478,7 @@ class KySettings(Adw.Application):
         self.add_wireless_page()
         self.add_keyboard_page()
         self.add_timers_page()
+        self.add_privacy_page()
 
         self._initializing = False
 
@@ -74,6 +497,23 @@ class KySettings(Adw.Application):
             self.show_welcome()
             FIRST_RUN_FLAG.parent.mkdir(parents=True, exist_ok=True)
             FIRST_RUN_FLAG.touch()
+
+    def on_window_close(self, win):
+        """Save the window size on close so it reopens the same way."""
+        save_window_state(win)
+        return False
+
+    def install_mountain_theme(self):
+        """Apply the wallpaper-derived palette only inside KySettings."""
+        if getattr(self, "mountain_css", None) is not None:
+            return
+        self.mountain_css = Gtk.CssProvider()
+        self.mountain_css.load_from_data(MOUNTAIN_CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            self.mountain_css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
 
     def pin_to_dash(self):
         """Pin app to GNOME dash on first run."""
@@ -112,10 +552,10 @@ class KySettings(Adw.Application):
         ("org.gnome.desktop.interface", "monospace-font-name", "Ubuntu Sans Mono 13", "Ubuntu Mono 13"),
         # Wallpaper
         ("org.gnome.desktop.background", "picture-uri-dark",
-         "file:///usr/share/backgrounds/Fuji_san_by_amaral.png",
+         "file:///home/ky/Pictures/Wallpapers/voidflow-mountains.png",
          "file:///usr/share/backgrounds/ubuntu-wallpaper-d.png"),
         ("org.gnome.desktop.background", "picture-uri",
-         "file:///usr/share/backgrounds/Fuji_san_by_amaral.png",
+         "file:///home/ky/Pictures/Wallpapers/voidflow-mountains.png",
          "file:///usr/share/backgrounds/ubuntu-wallpaper-d.png"),
         ("org.gnome.desktop.background", "picture-options", "zoom", "zoom"),
         # Dock
@@ -223,26 +663,26 @@ class KySettings(Adw.Application):
         audio_group = Adw.PreferencesGroup()
         audio_group.set_title("Gaming")
 
-        # Minecraft auto-mute install row
+        # Game auto-mute install row
         mc_install_row = Adw.ActionRow()
-        mc_install_row.set_title("Minecraft Auto-Mute Script")
-        mc_install_row.set_subtitle("For standard Minecraft Java Edition on Linux")
-        self.mc_install_btn = Gtk.Button(label="Installed" if self.is_mc_mute_installed() else "Install")
-        self.mc_install_btn.set_valign(Gtk.Align.CENTER)
-        self.mc_install_btn.set_sensitive(not self.is_mc_mute_installed())
-        self.mc_install_btn.connect("clicked", self.on_mc_mute_install)
-        mc_install_row.add_suffix(self.mc_install_btn)
+        mc_install_row.set_title("Game Auto-Mute Script")
+        mc_install_row.set_subtitle("Covers Steam/Proton, Minecraft, Lutris, Heroic and Bottles")
+        self.game_mute_btn = Gtk.Button(label="Installed" if self.is_game_mute_installed() else "Install")
+        self.game_mute_btn.set_valign(Gtk.Align.CENTER)
+        self.game_mute_btn.set_sensitive(not self.is_game_mute_installed())
+        self.game_mute_btn.connect("clicked", self.on_game_mute_install)
+        mc_install_row.add_suffix(self.game_mute_btn)
         audio_group.add(mc_install_row)
 
-        # Minecraft auto-mute toggle
+        # Game auto-mute toggle
         mc_mute_row = Adw.SwitchRow()
-        mc_mute_row.set_title("Minecraft Auto-Mute")
-        mc_mute_row.set_subtitle("Mute Minecraft Java Edition when window loses focus")
-        mc_mute_row.set_active(self.is_minecraft_mute_running())
-        mc_mute_row.set_sensitive(self.is_mc_mute_installed())
-        mc_mute_row.connect("notify::active", self.on_minecraft_mute_toggle)
+        mc_mute_row.set_title("Game Auto-Mute")
+        mc_mute_row.set_subtitle("Mute any running game while its window is not focused")
+        mc_mute_row.set_active(self.is_game_mute_enabled())
+        mc_mute_row.set_sensitive(self.is_game_mute_installed())
+        mc_mute_row.connect("notify::active", self.on_game_mute_toggle)
         audio_group.add(mc_mute_row)
-        self.mc_mute_row = mc_mute_row
+        self.game_mute_row = mc_mute_row
 
         page.add(audio_group)
 
@@ -407,123 +847,123 @@ class KySettings(Adw.Application):
             row.set_active(not enable)
         row.set_subtitle("Auto-hide the GNOME top bar")
 
-    def is_mc_mute_installed(self):
-        """Check if minecraft-auto-mute script and deps are installed."""
-        script = os.path.expanduser("~/.local/bin/minecraft-auto-mute.sh")
-        return os.path.exists(script)
+    def is_game_mute_installed(self):
+        """Check if the game auto-mute script is installed."""
+        return os.path.exists(GAME_MUTE_SCRIPT)
 
-    def is_minecraft_mute_running(self):
-        """Check if minecraft-auto-mute.sh is running."""
+    def is_game_mute_running(self):
+        """True if the daemon holds its single-instance lock.
+
+        Deliberately not `pgrep -f`: that matches any command line which merely
+        mentions the script, which made the switch read as "on" while nothing
+        was actually running.
+        """
         try:
-            result = subprocess.run(
-                ["pgrep", "-f", "minecraft-auto-mute"],
-                capture_output=True
-            )
-            return result.returncode == 0
-        except:
+            fd = os.open(GAME_MUTE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError:
             return False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
 
-    def on_mc_mute_install(self, button):
-        """Install minecraft-auto-mute script and dependencies."""
+    def game_mute_pid(self):
+        """PID recorded by the running daemon, or None."""
+        try:
+            return int(GAME_MUTE_LOCK.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    def stop_game_mute(self):
+        """Stop the daemon by PID so it can unmute what it muted."""
+        pid = self.game_mute_pid()
+        if pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+    def is_game_mute_enabled(self):
+        """The switch is on if the daemon runs now or is set to run at login."""
+        return GAME_MUTE_AUTOSTART.exists() or self.is_game_mute_running()
+
+    def set_game_mute_autostart(self, enabled):
+        """Add or remove the autostart entry so the toggle survives a reboot."""
+        try:
+            if enabled:
+                GAME_MUTE_AUTOSTART.parent.mkdir(parents=True, exist_ok=True)
+                GAME_MUTE_AUTOSTART.write_text(
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    "Name=Game Auto-Mute\n"
+                    "Comment=Mute games while their window is not focused\n"
+                    f"Exec={GAME_MUTE_SCRIPT}\n"
+                    "X-GNOME-Autostart-enabled=true\n"
+                    "NoDisplay=true\n"
+                )
+            else:
+                GAME_MUTE_AUTOSTART.unlink(missing_ok=True)
+        except Exception as e:
+            print(f"Failed to update game auto-mute autostart: {e}")
+
+    def on_game_mute_install(self, button):
+        """Install the game auto-mute script and its dependencies."""
         button.set_sensitive(False)
         button.set_label("Installing...")
 
-        # Install xdotool if missing
-        try:
-            subprocess.run(["which", "xdotool"], check=True, capture_output=True)
-        except subprocess.CalledProcessError:
-            subprocess.Popen(
-                ["pkexec", "apt", "install", "-y", "xdotool"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        # xprop/xdotool come from x11-utils and xdotool
+        for tool, pkg in (("xprop", "x11-utils"), ("xdotool", "xdotool")):
+            try:
+                subprocess.run(["which", tool], check=True, capture_output=True)
+            except subprocess.CalledProcessError:
+                subprocess.Popen(
+                    ["pkexec", "apt", "install", "-y", pkg],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
-        # Write the script
-        script_path = os.path.expanduser("~/.local/bin/minecraft-auto-mute.sh")
-        os.makedirs(os.path.dirname(script_path), exist_ok=True)
-        script_content = '''#!/bin/bash
-# Auto-mute Minecraft when window loses focus
-# Uses PipeWire (wpctl) and xdotool for window monitoring
+        os.makedirs(os.path.dirname(GAME_MUTE_SCRIPT), exist_ok=True)
+        with open(GAME_MUTE_SCRIPT, "w") as f:
+            f.write(GAME_MUTE_SCRIPT_SOURCE)
+        os.chmod(GAME_MUTE_SCRIPT, 0o755)
 
-MINECRAFT_MUTED=false
+        GLib.timeout_add(3000, self._game_mute_install_done)
 
-get_minecraft_stream_id() {
-    wpctl status | sed -n '/Streams:/,/^$/p' | grep -E "^\\s+[0-9]+\\. java" | head -1 | awk '{print $1}' | tr -d '.'
-}
-
-mute_minecraft() {
-    local stream_id=$(get_minecraft_stream_id)
-    if [[ -n "$stream_id" && "$MINECRAFT_MUTED" == "false" ]]; then
-        wpctl set-mute "$stream_id" 1
-        MINECRAFT_MUTED=true
-    fi
-}
-
-unmute_minecraft() {
-    local stream_id=$(get_minecraft_stream_id)
-    if [[ -n "$stream_id" && "$MINECRAFT_MUTED" == "true" ]]; then
-        wpctl set-mute "$stream_id" 0
-        MINECRAFT_MUTED=false
-    fi
-}
-
-is_minecraft_focused() {
-    local active_window=$(xdotool getactivewindow 2>/dev/null)
-    if [[ -z "$active_window" ]]; then
-        return 1
-    fi
-    local window_class=$(xprop -id "$active_window" WM_CLASS 2>/dev/null | grep -i minecraft)
-    local window_name=$(xdotool getwindowname "$active_window" 2>/dev/null)
-    if [[ -n "$window_class" ]] || [[ "$window_name" == *"Minecraft"* ]]; then
-        return 0
-    fi
-    return 1
-}
-
-if is_minecraft_focused; then
-    MINECRAFT_MUTED=false
-else
-    mute_minecraft
-fi
-
-xprop -root -spy _NET_ACTIVE_WINDOW 2>/dev/null | while read -r line; do
-    if is_minecraft_focused; then
-        unmute_minecraft
-    else
-        mute_minecraft
-    fi
-done
-'''
-        with open(script_path, 'w') as f:
-            f.write(script_content)
-        os.chmod(script_path, 0o755)
-
-        GLib.timeout_add(3000, self._mc_mute_install_done)
-
-    def _mc_mute_install_done(self):
-        if self.is_mc_mute_installed():
-            self.mc_install_btn.set_label("Installed")
-            self.mc_mute_row.set_sensitive(True)
+    def _game_mute_install_done(self):
+        if self.is_game_mute_installed():
+            self.game_mute_btn.set_label("Installed")
+            self.game_mute_row.set_sensitive(True)
         else:
-            self.mc_install_btn.set_label("Install")
-            self.mc_install_btn.set_sensitive(True)
+            self.game_mute_btn.set_label("Install")
+            self.game_mute_btn.set_sensitive(True)
         return False
 
-    def on_minecraft_mute_toggle(self, row, _):
-        """Start or stop the Minecraft auto-mute script."""
+    def on_game_mute_toggle(self, row, _):
+        """Start or stop the game auto-mute script."""
         if self._initializing:
             return
-        script_path = os.path.expanduser("~/.local/bin/minecraft-auto-mute.sh")
 
         if row.get_active():
+            # The old Minecraft-only daemon would fight this one over the same
+            # streams, so retire it if it is still running.
+            subprocess.run(["pkill", "-f", "minecraft-auto-mute"], capture_output=True)
+            self.set_game_mute_autostart(True)
+            # The daemon takes its own lock, so a double-start is harmless.
             subprocess.Popen(
-                [script_path],
+                [GAME_MUTE_SCRIPT],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True
             )
         else:
-            subprocess.run(["pkill", "-f", "minecraft-auto-mute"], capture_output=True)
+            self.set_game_mute_autostart(False)
+            self.stop_game_mute()
+
 
     # =========================================================================
     # EFFECTS PAGE
@@ -801,18 +1241,40 @@ done
         """Full reset: adapter reset + scan + reconnect paired devices."""
         button.set_sensitive(False)
         button.set_label("Resetting...")
-        subprocess.Popen(
+        self._bt_reset_proc = subprocess.Popen(
             ["pkexec", os.path.expanduser("~/.local/bin/bt-reset")],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        # Re-enable button and refresh state after sequence completes (~15s)
-        GLib.timeout_add(16000, self._bluetooth_reset_done, button)
+        # Poll every 2s until the process finishes (up to 60s)
+        self._bt_reset_polls = 0
+        GLib.timeout_add(2000, self._bluetooth_reset_poll, button)
 
-    def _bluetooth_reset_done(self, button):
+    def _bluetooth_reset_poll(self, button):
+        self._bt_reset_polls += 1
+        ret = self._bt_reset_proc.poll()
+        if ret is None and self._bt_reset_polls < 30:
+            # Still running — update label with elapsed time
+            elapsed = self._bt_reset_polls * 2
+            button.set_label(f"Resetting... ({elapsed}s)")
+            return True  # keep polling
+        # Done (or timed out)
         button.set_sensitive(True)
-        button.set_label("Reset")
+        # Check if A2DP came up by reading the log
+        try:
+            log = open("/tmp/bt-reset.log").read()
+            if "A2DP transport verified OK" in log:
+                button.set_label("Reset ✓")
+            else:
+                button.set_label("Reset (no A2DP)")
+        except Exception:
+            button.set_label("Reset")
         self._bluetooth_refresh_state()
+        GLib.timeout_add(5000, self._bluetooth_reset_label_clear, button)
+        return False
+
+    def _bluetooth_reset_label_clear(self, button):
+        button.set_label("Reset")
         return False
 
     def _bluetooth_refresh_state(self):
@@ -1534,5 +1996,66 @@ done
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+    def add_privacy_page(self):
+        page = Adw.PreferencesPage()
+        page.set_title("Privacy")
+        page.set_icon_name("security-high-symbolic")
+
+        # Cleanup group
+        cleanup_group = Adw.PreferencesGroup()
+        cleanup_group.set_title("Cleanup")
+        cleanup_group.set_description("Manage temporary and old files")
+
+        # Screenshot cleanup toggle
+        ss_row = Adw.SwitchRow()
+        ss_row.set_title("Auto-delete Screenshots")
+        ss_row.set_subtitle("Delete screenshots older than 24 hours from Pictures/Screenshots")
+        ss_row.set_active(self.is_ss_cleanup_enabled())
+        ss_row.connect("notify::active", self.on_ss_cleanup_toggle)
+        cleanup_group.add(ss_row)
+
+        page.add(cleanup_group)
+        self.stack.add_titled(page, "privacy", "Privacy")
+
+    def is_ss_cleanup_enabled(self):
+        """Check if screenshot cleanup is enabled."""
+        return SS_CLEANUP_FLAG.exists()
+
+    def on_ss_cleanup_toggle(self, row, _):
+        """Enable or disable screenshot cleanup."""
+        if self._initializing:
+            return
+        if row.get_active():
+            SS_CLEANUP_FLAG.touch()
+            # Run cleanup immediately
+            self.cleanup_screenshots_loop()
+        else:
+            if SS_CLEANUP_FLAG.exists():
+                SS_CLEANUP_FLAG.unlink()
+
+    def cleanup_screenshots_loop(self):
+        """Background loop to delete old screenshots."""
+        if not self.is_ss_cleanup_enabled():
+            return True # Keep the timer running
+
+        ss_dir = pathlib.Path.home() / "Pictures" / "Screenshots"
+        if not ss_dir.exists():
+            return True
+
+        now = datetime.now()
+        cutoff = now - timedelta(hours=24)
+
+        try:
+            for file in ss_dir.glob("Screenshot from *.png"):
+                if file.is_file():
+                    mtime = datetime.fromtimestamp(file.stat().st_mtime)
+                    if mtime < cutoff:
+                        print(f"Deleting old screenshot: {file}")
+                        file.unlink()
+        except Exception as e:
+            print(f"Error during screenshot cleanup: {e}")
+
+        return True # Keep the timer running
 
 KySettings().run(None)

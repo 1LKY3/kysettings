@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Auto-mute games when their window loses focus.
+
+Watches _NET_ACTIVE_WINDOW (Xwayland/X11) and mutes every PipeWire output
+stream that belongs to a game process which does not own the focused window.
+Only streams this script muted are ever unmuted again, so a manual mute is
+never undone. On exit everything it muted is restored.
+
+Extra detection markers (one lowercase substring per line, matched against a
+process's cmdline) can be added in ~/.config/kysettings/game-mute-markers.txt
+"""
+
+import fcntl
+import json
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import pathlib
+
+POLL_INTERVAL = 2.0  # re-scan even without a focus change, to catch new streams
+MAX_ANCESTRY = 12
+
+CONFIG_DIR = pathlib.Path.home() / ".config" / "kysettings"
+EXTRA_MARKERS_FILE = CONFIG_DIR / "game-mute-markers.txt"
+LOCK_FILE = CONFIG_DIR / "game-auto-mute.lock"
+
+# A process is a game if any of these appear in its cmdline or an ancestor's.
+GAME_MARKERS = (
+    "/steamapps/",          # anything Steam actually installed
+    "steamlaunch appid=",   # Steam's reaper wrapper
+    "wine64-preloader",
+    "wine-preloader",
+    "wineserver",
+    "/proton",
+    "proton_dist",
+    "lutris",
+    "heroic",
+    "bottles",
+    "legendary",
+    "prismlauncher",
+    "multimc",
+    "atlauncher",
+    "minecraft",
+)
+
+# Never treat these as games even if a marker matches somewhere.
+BINARY_DENYLIST = {
+    "steam",
+    "steamwebhelper",
+    "steamerrorreporter",
+    "pressure-vessel-adverb",
+}
+
+DEBUG = os.environ.get("GAME_AUTO_MUTE_DEBUG") == "1"
+
+
+def log(msg):
+    if DEBUG:
+        print(msg, file=sys.stderr, flush=True)
+
+
+def run(cmd):
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception:
+        return ""
+
+
+def load_markers():
+    markers = list(GAME_MARKERS)
+    try:
+        for line in EXTRA_MARKERS_FILE.read_text().splitlines():
+            line = line.strip().lower()
+            if line and not line.startswith("#"):
+                markers.append(line)
+    except Exception:
+        pass
+    return tuple(markers)
+
+
+MARKERS = load_markers()
+
+
+# --------------------------------------------------------------------------
+# process helpers
+# --------------------------------------------------------------------------
+
+def cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace").lower()
+    except OSError:
+        return ""
+
+
+def binary_name(pid):
+    try:
+        return os.path.basename(os.readlink(f"/proc/{pid}/exe")).lower()
+    except OSError:
+        return ""
+
+
+def parent_of(pid):
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read().decode("utf-8", "replace")
+        # comm can contain spaces/parens, so split after the final ')'
+        return int(data[data.rindex(")") + 1:].split()[1])
+    except (OSError, ValueError):
+        return 0
+
+
+def ancestry(pid):
+    """pid plus its parents, closest first."""
+    chain = []
+    while pid and pid > 1 and len(chain) < MAX_ANCESTRY:
+        chain.append(pid)
+        pid = parent_of(pid)
+    return chain
+
+
+def is_game(pid):
+    if binary_name(pid) in BINARY_DENYLIST:
+        return False
+    for ancestor in ancestry(pid):
+        text = cmdline(ancestor)
+        if any(marker in text for marker in MARKERS):
+            return True
+    return False
+
+
+def same_process_group(a, b):
+    """True if a and b are the same process or one is an ancestor of the other."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return a in ancestry(b) or b in ancestry(a)
+
+
+# --------------------------------------------------------------------------
+# pipewire helpers
+# --------------------------------------------------------------------------
+
+def audio_streams():
+    """[(node_id, pid, name)] for every audio output stream."""
+    try:
+        dump = json.loads(run(["pw-dump"]) or "[]")
+    except json.JSONDecodeError:
+        return []
+
+    streams = []
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Node":
+            continue
+        props = (obj.get("info") or {}).get("props") or {}
+        if props.get("media.class") != "Stream/Output/Audio":
+            continue
+        pid = props.get("application.process.id")
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            continue
+        name = props.get("application.name") or props.get("node.name") or str(pid)
+        streams.append((obj["id"], pid, name))
+    return streams
+
+
+def set_mute(node_id, muted):
+    subprocess.run(
+        ["wpctl", "set-mute", str(node_id), "1" if muted else "0"],
+        capture_output=True,
+    )
+
+
+# --------------------------------------------------------------------------
+# focus helpers
+# --------------------------------------------------------------------------
+
+def focused_pid():
+    """PID owning the focused X window, or None (0x0 = a Wayland-native window)."""
+    out = run(["xprop", "-root", "_NET_ACTIVE_WINDOW"])
+    match = re.search(r"(0x[0-9a-fA-F]+)", out)
+    if not match or int(match.group(1), 16) == 0:
+        return None
+    out = run(["xprop", "-id", match.group(1), "_NET_WM_PID"])
+    match = re.search(r"=\s*(\d+)", out)
+    return int(match.group(1)) if match else None
+
+
+# --------------------------------------------------------------------------
+# main
+# --------------------------------------------------------------------------
+
+muted_by_us = set()
+
+
+def restore_all():
+    for node_id in list(muted_by_us):
+        set_mute(node_id, False)
+    muted_by_us.clear()
+
+
+def sync():
+    focus = focused_pid()
+    live = set()
+
+    for node_id, pid, name in audio_streams():
+        if not is_game(pid):
+            continue
+        live.add(node_id)
+        if same_process_group(focus, pid):
+            if node_id in muted_by_us:
+                set_mute(node_id, False)
+                muted_by_us.discard(node_id)
+                log(f"unmute {name} (node {node_id})")
+        elif node_id not in muted_by_us:
+            set_mute(node_id, True)
+            muted_by_us.add(node_id)
+            log(f"mute {name} (node {node_id})")
+
+    # streams that disappeared (game closed) no longer need restoring
+    muted_by_us.intersection_update(live)
+
+
+def acquire_lock():
+    """Single-instance guard. Returns the fd, or None if already running."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    os.truncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def main():
+    if not os.environ.get("DISPLAY"):
+        os.environ["DISPLAY"] = ":0"
+
+    if acquire_lock() is None:
+        log("already running, exiting")
+        return
+
+    def bail(*_):
+        restore_all()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, bail)
+    signal.signal(signal.SIGINT, bail)
+    signal.signal(signal.SIGHUP, bail)
+
+    log(f"game-auto-mute started, {len(MARKERS)} markers")
+    sync()
+
+    spy = subprocess.Popen(
+        ["xprop", "-root", "-spy", "_NET_ACTIVE_WINDOW"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        while spy.poll() is None:
+            ready, _, _ = select.select([spy.stdout], [], [], POLL_INTERVAL)
+            if ready:
+                if not spy.stdout.readline():
+                    break
+            sync()
+    finally:
+        spy.terminate()
+        restore_all()
+
+
+if __name__ == "__main__":
+    main()

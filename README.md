@@ -46,7 +46,27 @@ sudo apt remove python3-gi gir1.2-adw-1 redsocks
 **Display**
 - Extended screen blank timeout (up to 4 hours)
 - Pin to dash toggle
-- Minecraft auto-mute — automatically mutes the standard Linux Minecraft installation (Java Edition) when the window loses focus
+- Window size is remembered between launches
+- Game auto-mute — mutes any running game while its window is not focused, and unmutes it when you come back
+
+**Game auto-mute detection**
+
+A PipeWire stream counts as a game if its process (or any ancestor) is a Steam/Proton
+title, a Wine process, Minecraft, or a Lutris/Heroic/Bottles launch. Add your own
+matches — one lowercase substring per line, matched against the process cmdline — in:
+
+```
+~/.config/kysettings/game-mute-markers.txt
+```
+
+Only streams the script muted itself are ever unmuted, so a manual mute is never
+undone, and everything is restored when the toggle is switched off.
+
+The toggle also writes `~/.config/autostart/game-auto-mute.desktop`, so it stays
+on across reboots. The daemon holds an flock on
+`~/.config/kysettings/game-auto-mute.lock`; starting it twice is harmless, and
+the switch reads that lock rather than a `pgrep` match (`pgrep -f` matches any
+command line that merely mentions the script, which reported false positives).
 
 **Wireless**
 - Bluetooth power toggle and adapter reset

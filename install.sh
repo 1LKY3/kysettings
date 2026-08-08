@@ -36,8 +36,13 @@ chmod +x ~/.local/bin/pdanet-proxy
 cp scripts/pdanet ~/.local/bin/pdanet
 chmod +x ~/.local/bin/pdanet
 
-cp scripts/minecraft-auto-mute ~/.local/bin/minecraft-auto-mute.sh
-chmod +x ~/.local/bin/minecraft-auto-mute.sh
+cp scripts/game-auto-mute ~/.local/bin/game-auto-mute.py
+chmod +x ~/.local/bin/game-auto-mute.py
+
+# Superseded by game-auto-mute; retire any leftover copy so the two daemons
+# never fight over the same PipeWire streams.
+pkill -f minecraft-auto-mute 2>/dev/null || true
+rm -f ~/.local/bin/minecraft-auto-mute.sh
 
 cp scripts/speech-lock ~/.local/bin/speech-lock
 chmod +x ~/.local/bin/speech-lock
