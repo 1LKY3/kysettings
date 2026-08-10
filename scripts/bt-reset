@@ -7,12 +7,43 @@ rfkill unblock bluetooth 2>/dev/null
 systemctl restart bluetooth
 sleep 2
 
-# Restart PipeWire stack so WirePlumber can re-register Bluetooth audio profiles
-# This fixes the common issue where headphones show "Connected" but don't appear in Sound Output
-REAL_USER="${SUDO_USER:-${PKEXEC_UID:+$(id -nu "$PKEXEC_UID")}}"
-if [ -n "$REAL_USER" ]; then
-    su - "$REAL_USER" -c 'systemctl --user restart pipewire pipewire-pulse wireplumber' 2>/dev/null
-fi
+# Restart PipeWire stack so WirePlumber can re-register Bluetooth audio profiles.
+# This fixes the common issue where headphones show "Connected" but don't appear
+# in Sound Output.
+#
+# Resolve the calling user by UID, not by name: PKEXEC_UID is always a number,
+# so nothing user-controlled reaches a shell. `runuser` is used instead of `su`
+# because it takes the command as argv (no shell parsing of the user name) and
+# skips PAM auth when already root. `systemctl --user` needs to be pointed at
+# that user's own bus explicitly — a root shell has no session bus of theirs.
+restart_user_pipewire() {
+    local uid="${PKEXEC_UID:-${SUDO_UID:-}}"
+
+    # Fall back to a name only if neither UID variable was set.
+    if [ -z "$uid" ] && [ -n "${SUDO_USER:-}" ]; then
+        uid="$(id -u -- "$SUDO_USER" 2>/dev/null)"
+    fi
+
+    # Must be a plain number, and never root: uid 0 has no user PipeWire.
+    case "$uid" in
+        '' | *[!0-9]*) return 0 ;;
+        0) return 0 ;;
+    esac
+
+    local user
+    user="$(id -nu -- "$uid" 2>/dev/null)" || return 0
+    [ -n "$user" ] || return 0
+
+    # No runtime dir means no logged-in session to restart anything for.
+    [ -d "/run/user/$uid" ] || return 0
+
+    runuser -u "$user" -- env \
+        "XDG_RUNTIME_DIR=/run/user/$uid" \
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+        systemctl --user restart pipewire pipewire-pulse wireplumber 2>/dev/null
+}
+
+restart_user_pipewire
 sleep 2
 
 bluetoothctl power on

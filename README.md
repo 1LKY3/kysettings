@@ -44,10 +44,13 @@ sudo apt remove python3-gi gir1.2-adw-1 redsocks
 ## Features
 
 **Display**
+- Kyle's Desktop toggle — ON applies the theme/font/dock set, OFF restores this
+  machine's own defaults
 - Extended screen blank timeout (up to 4 hours)
 - Pin to dash toggle
 - Window size is remembered between launches
 - Game auto-mute — mutes any running game while its window is not focused, and unmutes it when you come back
+- Wayland Focus (experimental) — extends game auto-mute to Wayland-native games
 - Minimize on Right-Click — adds a **Minimize** entry to the dock's app icon right-click menu
 
 **Minimize on Right-Click**
@@ -85,7 +88,32 @@ matches — one lowercase substring per line, matched against the process cmdlin
 Only streams the script muted itself are ever unmuted, so a manual mute is never
 undone, and everything is restored when the toggle is switched off.
 
-The toggle also writes `~/.config/autostart/game-auto-mute.desktop`, so it stays
+**Wayland Focus (experimental)**
+
+Game auto-mute finds the focused window through `_NET_ACTIVE_WINDOW`, which only
+X11 and Xwayland windows appear in. A Wayland-native window reports as `0x0`
+there — indistinguishable from "nothing is focused" — so a focused Wayland-native
+game looks unfocused and gets muted *while you are playing it*. Proton, Wine and
+most launchers go through Xwayland, so the X11 path covers nearly everything;
+native Vulkan/SDL3 and Godot titles are where it bites.
+
+Wayland deliberately gives clients no way to ask which window has focus, and
+GNOME's own `org.gnome.Shell.Introspect` refuses callers that aren't on its
+allowlist, so the answer has to come from inside the shell. The
+`ky-focus@ky.local` extension shipped here publishes just the focused window's
+PID on the session bus, and the daemon asks it first when the experiment is on.
+
+It is a **separate toggle beside Game Auto-Mute, not a replacement**. Off — the
+default — is the X11 path unchanged, with no code in common. On, the daemon
+prefers the shell and still falls back to X11 whenever the shell cannot answer,
+so a missing or disabled extension degrades to the old behaviour rather than
+breaking. The switch writes `~/.config/kysettings/wayland-focus.enabled`, enables
+the extension, and restarts the daemon; the extension itself loads at the next
+login like any other.
+
+Leave it off until it has been proven on real Wayland-native games.
+
+The Game Auto-Mute toggle also writes `~/.config/autostart/game-auto-mute.desktop`, so it stays
 on across reboots. The daemon holds an flock on
 `~/.config/kysettings/game-auto-mute.lock`; starting it twice is harmless, and
 the switch reads that lock rather than a `pgrep` match (`pgrep -f` matches any
@@ -115,6 +143,26 @@ pdanet on       # Enable system proxy (gsettings + env vars + apt)
 pdanet off      # Disable and reset all settings
 pdanet status   # Check current state
 ```
+
+## Portability
+
+Nothing is tied to one machine's home directory. Two details worth knowing if you
+install this somewhere else:
+
+- **Wallpaper.** The Kyle's Desktop toggle looks for `voidflow-mountains.png` in
+  `~/Pictures/Wallpapers` (then `~/.local/share/backgrounds`). The image is not
+  shipped with the app, so if it isn't there the rest of the theme still applies
+  and your wallpaper is left alone.
+- **Missing schemas are skipped, not fatal.** `Gio.Settings.new()` on a schema
+  that isn't installed aborts the process — it is a GLib fatal error that no
+  `try`/`except` can catch. Every non-stock schema is therefore looked up first,
+  so a machine without dash-to-dock skips those keys and reports them instead of
+  crashing.
+
+Turning the toggle OFF resets each key to this install's own default rather than
+to hardcoded values, except for four where the wanted off-state genuinely isn't
+the stock default (`gtk-theme`, `color-scheme`, `monospace-font-name`, and the
+dock's `autohide` — otherwise off would mean a light theme and a hiding dock).
 
 ## Requirements
 

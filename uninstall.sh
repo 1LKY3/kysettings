@@ -37,9 +37,11 @@ pkill -f speech-lock 2>/dev/null || true
 rm -f ~/.local/bin/speech-lock
 rm -f ~/.local/bin/bt-reset
 
-# Remove GNOME Shell extension
-gnome-extensions disable dash-minimize@ky.local 2>/dev/null || true
-rm -rf "$HOME/.local/share/gnome-shell/extensions/dash-minimize@ky.local"
+# Remove GNOME Shell extensions
+for uuid in dash-minimize@ky.local ky-focus@ky.local; do
+    gnome-extensions disable "$uuid" 2>/dev/null || true
+    rm -rf "${HOME:?}/.local/share/gnome-shell/extensions/$uuid"
+done
 
 # Remove icon
 rm -f ~/.local/share/icons/hicolor/256x256/apps/com.ky.settings.png

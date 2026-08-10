@@ -10,8 +10,11 @@ import fcntl
 import json
 import os
 import signal
+import sys
 import pathlib
 from datetime import datetime, timedelta
+
+__version__ = "0.1.0"
 
 FIRST_RUN_FLAG = pathlib.Path.home() / ".config" / "kysettings" / ".installed"
 SS_CLEANUP_FLAG = pathlib.Path.home() / ".config" / "kysettings" / ".ss_cleanup"
@@ -19,6 +22,9 @@ WINDOW_STATE = pathlib.Path.home() / ".config" / "kysettings" / "window.json"
 GAME_MUTE_SCRIPT = os.path.expanduser("~/.local/bin/game-auto-mute.py")
 GAME_MUTE_AUTOSTART = pathlib.Path.home() / ".config" / "autostart" / "game-auto-mute.desktop"
 GAME_MUTE_LOCK = pathlib.Path.home() / ".config" / "kysettings" / "game-auto-mute.lock"
+# Presence opts the daemon into the experimental shell-backed focus source.
+GAME_MUTE_WAYLAND_FLAG = (
+    pathlib.Path.home() / ".config" / "kysettings" / "wayland-focus.enabled")
 
 # Written verbatim by the in-app Install button. Keep in sync with
 # scripts/game-auto-mute, which install.sh copies into ~/.local/bin.
@@ -50,6 +56,8 @@ MAX_ANCESTRY = 12
 CONFIG_DIR = pathlib.Path.home() / ".config" / "kysettings"
 EXTRA_MARKERS_FILE = CONFIG_DIR / "game-mute-markers.txt"
 LOCK_FILE = CONFIG_DIR / "game-auto-mute.lock"
+# Written by Ky Settings' experimental toggle; absent means X11-only.
+WAYLAND_FOCUS_FLAG = CONFIG_DIR / "wayland-focus.enabled"
 
 # A process is a game if any of these appear in its cmdline or an ancestor's.
 GAME_MARKERS = (
@@ -206,7 +214,29 @@ def set_mute(node_id, muted):
 # focus helpers
 # --------------------------------------------------------------------------
 
-def focused_pid():
+UNAVAILABLE = object()  # shell helper not answering, as opposed to "no focus"
+
+FOCUS_BUS = "org.kysettings.Focus"
+FOCUS_PATH = "/org/kysettings/Focus"
+
+
+def shell_focused_pid():
+    """Focused PID according to GNOME Shell, or UNAVAILABLE if it can't answer.
+
+    Needs the ky-focus extension. Wayland gives clients no way to ask which
+    window has focus, and GNOME's own Introspect API refuses callers that aren't
+    on its allowlist, so a shell extension is the only source.
+    """
+    out = run(["gdbus", "call", "--session", "--dest", FOCUS_BUS,
+               "--object-path", FOCUS_PATH,
+               "--method", f"{FOCUS_BUS}.GetFocusedPid"])
+    match = re.search(r"\((\d+),?\)", out)
+    if not match:
+        return UNAVAILABLE
+    return int(match.group(1)) or None
+
+
+def x11_focused_pid():
     """PID owning the focused X window, or None (0x0 = a Wayland-native window)."""
     out = run(["xprop", "-root", "_NET_ACTIVE_WINDOW"])
     match = re.search(r"(0x[0-9a-fA-F]+)", out)
@@ -215,6 +245,33 @@ def focused_pid():
     out = run(["xprop", "-id", match.group(1), "_NET_WM_PID"])
     match = re.search(r"=\s*(\d+)", out)
     return int(match.group(1)) if match else None
+
+
+def wayland_focus_enabled():
+    """Whether to consult the shell for focus. Opt-in, off by default.
+
+    The X11 path is the proven one and stays in charge unless this flag is set
+    by Ky Settings, so turning the experiment off restores exactly the previous
+    behaviour with no code path in common.
+    """
+    return WAYLAND_FOCUS_FLAG.exists()
+
+
+def focused_pid():
+    """PID owning the focused window, or None if nothing relevant has focus.
+
+    With the experiment on, the shell is asked first because it is the only
+    thing that can see Wayland-native windows. They never appear in
+    _NET_ACTIVE_WINDOW, which reports 0x0 for them — indistinguishable from
+    "nothing is focused", so a focused Wayland-native game looks unfocused and
+    gets muted while you are playing it. X11 answers everything else, and is
+    still the fallback whenever the shell cannot be reached.
+    """
+    if wayland_focus_enabled():
+        pid = shell_focused_pid()
+        if pid is not UNAVAILABLE:
+            return pid
+    return x11_focused_pid()
 
 
 # --------------------------------------------------------------------------
@@ -266,6 +323,15 @@ def acquire_lock():
     return fd
 
 
+def spawn(cmd):
+    """Start a line-emitting watcher, or None if it can't run."""
+    try:
+        return subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+
+
 def main():
     if not os.environ.get("DISPLAY"):
         os.environ["DISPLAY"] = ":0"
@@ -282,23 +348,38 @@ def main():
     signal.signal(signal.SIGINT, bail)
     signal.signal(signal.SIGHUP, bail)
 
-    log(f"game-auto-mute started, {len(MARKERS)} markers")
+    experimental = wayland_focus_enabled()
+    if experimental and shell_focused_pid() is UNAVAILABLE:
+        log("wayland focus enabled but ky-focus is not answering; using X11")
+        experimental = False
+    log(f"game-auto-mute started, {len(MARKERS)} markers, "
+        f"focus source: {'shell + X11 (experimental)' if experimental else 'X11'}")
     sync()
 
-    spy = subprocess.Popen(
-        ["xprop", "-root", "-spy", "_NET_ACTIVE_WINDOW"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    # Two independent wake-ups: X11 focus changes, and the shell's FocusChanged
+    # for Wayland-native windows. Either may be absent; the poll timeout below
+    # keeps things correct even when both are.
+    watchers = [w for w in (
+        spawn(["xprop", "-root", "-spy", "_NET_ACTIVE_WINDOW"]),
+        spawn(["gdbus", "monitor", "--session", "--dest", FOCUS_BUS])
+        if experimental else None,
+    ) if w is not None]
+
     try:
-        while spy.poll() is None:
-            ready, _, _ = select.select([spy.stdout], [], [], POLL_INTERVAL)
-            if ready:
-                if not spy.stdout.readline():
-                    break
+        while True:
+            live = [w for w in watchers if w.poll() is None]
+            if watchers and not live:
+                break  # every watcher died; nothing left to wait on
+            ready, _, _ = select.select([w.stdout for w in live], [], [],
+                                        POLL_INTERVAL)
+            for stream in ready:
+                if not stream.readline():
+                    # EOF: drop that watcher, keep going on whatever remains.
+                    watchers = [w for w in watchers if w.stdout is not stream]
             sync()
     finally:
-        spy.terminate()
+        for w in watchers:
+            w.terminate()
         restore_all()
 
 
@@ -539,32 +620,38 @@ class KySettings(Adw.Application):
         dialog.add_response("ok", "Got it")
         dialog.present()
 
-    # (schema, key, kyle_value, ubuntu_default)
+    # Sentinel for "restore this install's own default" — see DESKTOP_SETTINGS.
+    _RESET = object()
+
+    # (schema, key, on_value) or (schema, key, on_value, off_value).
+    #
+    # Switching the toggle OFF resets the key by default, so what comes back is
+    # whatever this machine actually ships, vendor overrides included, instead of
+    # one machine's values hardcoded as everyone's "Ubuntu default". A fourth
+    # element is given only for the keys where the wanted off-state is genuinely
+    # not the stock default — without them, off would mean a light theme and an
+    # auto-hiding dock.
     DESKTOP_SETTINGS = [
-        # Theme
+        # Theme — stock default is light Yaru, but off should still be dark
         ("org.gnome.desktop.interface", "gtk-theme", "Yaru-sage-dark", "Yaru-dark"),
         ("org.gnome.desktop.interface", "color-scheme", "prefer-dark", "prefer-dark"),
-        ("org.gnome.desktop.interface", "icon-theme", "Yaru-sage", "Yaru"),
-        ("org.gnome.desktop.interface", "cursor-theme", "Yaru", "Yaru"),
+        ("org.gnome.desktop.interface", "icon-theme", "Yaru-sage"),
+        ("org.gnome.desktop.interface", "cursor-theme", "Yaru"),
         # Fonts
-        ("org.gnome.desktop.interface", "font-name", "Ubuntu Sans 11", "Ubuntu Sans 11"),
-        ("org.gnome.desktop.interface", "document-font-name", "Sans 11", "Sans 11"),
-        ("org.gnome.desktop.interface", "monospace-font-name", "Ubuntu Sans Mono 13", "Ubuntu Mono 13"),
-        # Wallpaper
-        ("org.gnome.desktop.background", "picture-uri-dark",
-         "file:///home/ky/Pictures/Wallpapers/voidflow-mountains.png",
-         "file:///usr/share/backgrounds/ubuntu-wallpaper-d.png"),
-        ("org.gnome.desktop.background", "picture-uri",
-         "file:///home/ky/Pictures/Wallpapers/voidflow-mountains.png",
-         "file:///usr/share/backgrounds/ubuntu-wallpaper-d.png"),
-        ("org.gnome.desktop.background", "picture-options", "zoom", "zoom"),
-        # Dock
-        ("org.gnome.shell.extensions.dash-to-dock", "dock-position", "BOTTOM", "LEFT"),
-        ("org.gnome.shell.extensions.dash-to-dock", "dash-max-icon-size", 38, 48),
+        ("org.gnome.desktop.interface", "font-name", "Ubuntu Sans 11"),
+        ("org.gnome.desktop.interface", "document-font-name", "Sans 11"),
+        ("org.gnome.desktop.interface", "monospace-font-name",
+         "Ubuntu Sans Mono 13", "Ubuntu Mono 13"),
+        # Wallpaper is appended at runtime — see _wallpaper_uri()
+        # Dock — stock default autohides, which is not wanted either way
+        ("org.gnome.shell.extensions.dash-to-dock", "dock-position", "BOTTOM"),
+        ("org.gnome.shell.extensions.dash-to-dock", "dash-max-icon-size", 38),
         ("org.gnome.shell.extensions.dash-to-dock", "autohide", True, False),
         # Compositor
-        ("org.gnome.mutter", "center-new-windows", False, False),
+        ("org.gnome.mutter", "center-new-windows", False),
     ]
+
+    WALLPAPER_NAME = "voidflow-mountains.png"
 
     def add_display_page(self):
         page = Adw.PreferencesPage()
@@ -684,6 +771,17 @@ class KySettings(Adw.Application):
         audio_group.add(mc_mute_row)
         self.game_mute_row = mc_mute_row
 
+        # Parallel to the row above rather than folded into it: the X11 path is
+        # proven, this one is not, so it stays separately switchable until it is.
+        wl_focus_row = Adw.SwitchRow()
+        wl_focus_row.set_title("Wayland Focus (Experimental)")
+        wl_focus_row.set_subtitle(self.WAYLAND_FOCUS_SUBTITLE)
+        wl_focus_row.set_active(self.is_wayland_focus_enabled())
+        wl_focus_row.set_sensitive(self.is_game_mute_installed())
+        wl_focus_row.connect("notify::active", self.on_wayland_focus_toggle)
+        audio_group.add(wl_focus_row)
+        self.wayland_focus_row = wl_focus_row
+
         page.add(audio_group)
 
         # Dock group
@@ -747,29 +845,86 @@ class KySettings(Adw.Application):
         except Exception as e:
             print(f"Error toggling pin: {e}")
 
+    @staticmethod
+    def _safe_settings(schema_id):
+        """Gio.Settings for schema_id, or None when it is not installed.
+
+        Gio.Settings.new() on an unknown schema is a GLib *fatal error*: it
+        aborts the process outright and no Python try/except can catch it. Any
+        schema that is not part of stock GNOME therefore has to be looked up
+        first. dash-to-dock is the one that bites — it ships with Ubuntu's
+        session but is absent on a plain GNOME install."""
+        source = Gio.SettingsSchemaSource.get_default()
+        if source is None or source.lookup(schema_id, True) is None:
+            return None
+        return Gio.Settings.new(schema_id)
+
+    def _wallpaper_uri(self):
+        """URI of the desktop wallpaper, or None if this machine hasn't got it.
+
+        The wallpaper is a personal file that the app does not ship, so it is
+        located relative to the current user's home rather than hardcoded. When
+        it is missing the rest of the theme still applies and the wallpaper is
+        left alone, instead of pointing GNOME at a path that exists on exactly
+        one machine."""
+        candidates = [
+            os.path.join(GLib.get_home_dir(), "Pictures", "Wallpapers", self.WALLPAPER_NAME),
+            os.path.join(GLib.get_user_data_dir(), "backgrounds", self.WALLPAPER_NAME),
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                return GLib.filename_to_uri(path, None)
+        return None
+
     def _detect_kyle_desktop(self):
         """Check if current desktop matches Kyle's settings (by gtk-theme)."""
+        s = self._safe_settings("org.gnome.desktop.interface")
+        if s is None:
+            return False
         try:
-            s = Gio.Settings.new("org.gnome.desktop.interface")
             return s.get_string("gtk-theme") == "Yaru-sage-dark"
         except Exception:
             return False
 
     def on_desktop_toggle(self, row, _pspec):
-        """Toggle between Kyle's desktop settings and Ubuntu defaults."""
+        """Toggle between Kyle's desktop settings and this system's defaults."""
         if self._initializing:
             return
         use_kyle = row.get_active()
-        # Index 2 = kyle_value, index 3 = ubuntu_default
-        idx = 2 if use_kyle else 3
+
+        entries = list(self.DESKTOP_SETTINGS)
+        wallpaper = self._wallpaper_uri()
+        if wallpaper or not use_kyle:
+            # Switching off only resets these, which is worth doing even on a
+            # machine that never had the wallpaper to begin with.
+            entries += [
+                ("org.gnome.desktop.background", "picture-uri", wallpaper),
+                ("org.gnome.desktop.background", "picture-uri-dark", wallpaper),
+                ("org.gnome.desktop.background", "picture-options", "zoom"),
+            ]
+
         applied = 0
+        skipped = []
         errors = []
-        for entry in self.DESKTOP_SETTINGS:
-            schema, key, kyle_val, default_val = entry
-            value = kyle_val if use_kyle else default_val
+        for entry in entries:
+            schema_id, key, on_value = entry[:3]
+            off_value = entry[3] if len(entry) > 3 else self._RESET
+            value = on_value if use_kyle else off_value
+
+            s = self._safe_settings(schema_id)
+            if s is None:
+                skipped.append(f"{schema_id} — not installed")
+                continue
+            # Setting a key the schema doesn't define is fatal the same way an
+            # unknown schema is, so this has to be checked too — an extension
+            # can be installed but too old to have the key.
+            if not s.get_property("settings-schema").has_key(key):
+                skipped.append(f"{schema_id} {key} — no such key")
+                continue
             try:
-                s = Gio.Settings.new(schema)
-                if isinstance(value, bool):
+                if value is self._RESET:
+                    s.reset(key)
+                elif isinstance(value, bool):  # before int: bool subclasses int
                     s.set_boolean(key, value)
                 elif isinstance(value, int):
                     s.set_int(key, value)
@@ -777,13 +932,18 @@ class KySettings(Adw.Application):
                     s.set_string(key, value)
                 applied += 1
             except Exception as e:
-                errors.append(f"{schema}.{key}: {e}")
+                errors.append(f"{schema_id} {key}: {e}")
 
-        label = "Kyle's settings" if use_kyle else "Ubuntu defaults"
+        label = "Kyle's settings" if use_kyle else "System defaults"
+        parts = [f"{label} applied ({applied} settings)."]
+        if use_kyle and wallpaper is None:
+            parts.append(f"Wallpaper unchanged — no {self.WALLPAPER_NAME} "
+                         f"in ~/Pictures/Wallpapers.")
+        if skipped:
+            parts.append(f"{len(skipped)} skipped:\n" + "\n".join(skipped[:5]))
         if errors:
-            body = f"Applied {applied} {label}.\n{len(errors)} failed:\n" + "\n".join(errors[:5])
-        else:
-            body = f"{label} applied ({applied} settings)."
+            parts.append(f"{len(errors)} failed:\n" + "\n".join(errors[:5]))
+        body = "\n\n".join(parts)
 
         dialog = Adw.MessageDialog(
             transient_for=self.win,
@@ -881,31 +1041,60 @@ class KySettings(Adw.Application):
     DASH_MINIMIZE_UUID = "dash-minimize@ky.local"
     DASH_MINIMIZE_SUBTITLE = "Add a Minimize entry to dock icon right-click menus"
 
-    def _is_dash_minimize_installed(self):
-        """Extension files are on disk (whether or not the shell has loaded them)."""
+    @staticmethod
+    def _is_extension_installed(uuid):
+        """Files are on disk, whether or not the shell has loaded them."""
         return os.path.isdir(os.path.expanduser(
-            f"~/.local/share/gnome-shell/extensions/{self.DASH_MINIMIZE_UUID}"))
+            f"~/.local/share/gnome-shell/extensions/{uuid}"))
 
-    def _is_dash_minimize_loaded(self):
-        """The running shell knows about the extension, so toggling is live."""
+    @staticmethod
+    def _is_extension_loaded(uuid):
+        """The running shell knows about it, so toggling takes effect now."""
         try:
             result = subprocess.run(
-                ["gnome-extensions", "info", self.DASH_MINIMIZE_UUID],
+                ["gnome-extensions", "info", uuid],
                 capture_output=True, text=True, timeout=5
             )
             return result.returncode == 0
         except Exception:
             return False
 
-    def _is_dash_minimize_enabled(self):
-        """`gnome-extensions enable` refuses extensions the shell has not scanned
-        yet, so the enabled-extensions key is the state that survives either way:
-        the shell applies it live when loaded, and at the next login when not."""
+    @staticmethod
+    def _is_extension_enabled(uuid):
         try:
             settings = Gio.Settings.new("org.gnome.shell")
-            return self.DASH_MINIMIZE_UUID in settings.get_strv("enabled-extensions")
+            return uuid in settings.get_strv("enabled-extensions")
         except Exception:
             return False
+
+    @staticmethod
+    def _set_extension_enabled(uuid, enable):
+        """Write the key the shell reads rather than calling `gnome-extensions
+        enable`, which refuses extensions the running shell has not scanned yet.
+        The shell applies this live when loaded, and at the next login when not."""
+        try:
+            settings = Gio.Settings.new("org.gnome.shell")
+            enabled = settings.get_strv("enabled-extensions")
+            if enable and uuid not in enabled:
+                enabled.append(uuid)
+            elif not enable and uuid in enabled:
+                enabled.remove(uuid)
+            settings.set_strv("enabled-extensions", enabled)
+
+            disabled = settings.get_strv("disabled-extensions")
+            if enable and uuid in disabled:
+                disabled.remove(uuid)
+                settings.set_strv("disabled-extensions", disabled)
+            return True
+        except Exception as e:
+            print(f"Failed to toggle extension {uuid}: {e}")
+            return False
+
+    def _is_dash_minimize_enabled(self):
+        return self._is_extension_enabled(self.DASH_MINIMIZE_UUID)
+
+    def _is_dash_minimize_loaded(self):
+        return self._is_extension_loaded(self.DASH_MINIMIZE_UUID)
 
     def on_dash_minimize_toggle(self, row, _pspec):
         """Enable or disable the Dash Minimize extension."""
@@ -913,26 +1102,12 @@ class KySettings(Adw.Application):
             return
         enable = row.get_active()
 
-        if enable and not self._is_dash_minimize_installed():
+        if enable and not self._is_extension_installed(self.DASH_MINIMIZE_UUID):
             row.set_subtitle("Not installed — run ./install.sh from the kysettings repo")
             row.set_active(False)
             return
 
-        try:
-            settings = Gio.Settings.new("org.gnome.shell")
-            enabled = settings.get_strv("enabled-extensions")
-            if enable and self.DASH_MINIMIZE_UUID not in enabled:
-                enabled.append(self.DASH_MINIMIZE_UUID)
-            elif not enable and self.DASH_MINIMIZE_UUID in enabled:
-                enabled.remove(self.DASH_MINIMIZE_UUID)
-            settings.set_strv("enabled-extensions", enabled)
-
-            disabled = settings.get_strv("disabled-extensions")
-            if enable and self.DASH_MINIMIZE_UUID in disabled:
-                disabled.remove(self.DASH_MINIMIZE_UUID)
-                settings.set_strv("disabled-extensions", disabled)
-        except Exception as e:
-            print(f"Failed to toggle Dash Minimize: {e}")
+        if not self._set_extension_enabled(self.DASH_MINIMIZE_UUID, enable):
             row.set_active(not enable)
             row.set_subtitle(self.DASH_MINIMIZE_SUBTITLE)
             return
@@ -1037,6 +1212,53 @@ class KySettings(Adw.Application):
             self.game_mute_btn.set_label("Install")
             self.game_mute_btn.set_sensitive(True)
         return False
+
+    KY_FOCUS_UUID = "ky-focus@ky.local"
+    WAYLAND_FOCUS_SUBTITLE = "Also mute Wayland-native games, not just Xwayland ones"
+
+    def is_wayland_focus_enabled(self):
+        return GAME_MUTE_WAYLAND_FLAG.exists()
+
+    def on_wayland_focus_toggle(self, row, _pspec):
+        """Opt in to the shell-backed focus source for game auto-mute.
+
+        Two things have to line up: the flag the daemon reads, and the ky-focus
+        extension that answers it. Turning this off removes both, which puts the
+        daemon back on the X11 path it has always used.
+        """
+        if self._initializing:
+            return
+        enable = row.get_active()
+
+        try:
+            if enable:
+                GAME_MUTE_WAYLAND_FLAG.parent.mkdir(parents=True, exist_ok=True)
+                GAME_MUTE_WAYLAND_FLAG.touch()
+            else:
+                GAME_MUTE_WAYLAND_FLAG.unlink(missing_ok=True)
+        except Exception as e:
+            print(f"Failed to update Wayland focus flag: {e}")
+            row.set_active(not enable)
+            return
+
+        self._set_extension_enabled(self.KY_FOCUS_UUID, enable)
+
+        # The daemon picks the flag up per-check, but it decides at startup
+        # whether to watch the shell's FocusChanged signal, so restart it to get
+        # instant reactions instead of waiting for the next poll.
+        if self.is_game_mute_running():
+            self.stop_game_mute()
+            subprocess.Popen(
+                [GAME_MUTE_SCRIPT],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+        if enable and not self._is_extension_loaded(self.KY_FOCUS_UUID):
+            row.set_subtitle("Log out and back in to load the focus helper")
+        else:
+            row.set_subtitle(self.WAYLAND_FOCUS_SUBTITLE)
 
     def on_game_mute_toggle(self, row, _):
         """Start or stop the game auto-mute script."""
@@ -1524,9 +1746,14 @@ class KySettings(Adw.Application):
         # 3. apt proxy (needs its own config)
         apt_conf = f'Acquire::http::Proxy "{proxy_url}";\nAcquire::https::Proxy "{proxy_url}";\n'
         try:
+            # Piped to tee rather than interpolated into `pkexec bash -c`: the
+            # content never becomes shell syntax, so it cannot break out of the
+            # quoting and run as root. Host and port are constants today, but
+            # this stops being safe the moment they are made editable.
             subprocess.run(
-                ["pkexec", "bash", "-c", f'echo \'{apt_conf}\' > /etc/apt/apt.conf.d/99pdanet-proxy'],
-                capture_output=True, timeout=10,
+                ["pkexec", "tee", "/etc/apt/apt.conf.d/99pdanet-proxy"],
+                input=apt_conf, text=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10,
             )
         except Exception:
             pass
@@ -2152,5 +2379,9 @@ class KySettings(Adw.Application):
             print(f"Error during screenshot cleanup: {e}")
 
         return True # Keep the timer running
+
+if "--version" in sys.argv:
+    print(f"kysettings {__version__}")
+    sys.exit(0)
 
 KySettings().run(None)

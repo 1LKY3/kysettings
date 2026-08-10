@@ -26,6 +26,8 @@ MAX_ANCESTRY = 12
 CONFIG_DIR = pathlib.Path.home() / ".config" / "kysettings"
 EXTRA_MARKERS_FILE = CONFIG_DIR / "game-mute-markers.txt"
 LOCK_FILE = CONFIG_DIR / "game-auto-mute.lock"
+# Written by Ky Settings' experimental toggle; absent means X11-only.
+WAYLAND_FOCUS_FLAG = CONFIG_DIR / "wayland-focus.enabled"
 
 # A process is a game if any of these appear in its cmdline or an ancestor's.
 GAME_MARKERS = (
@@ -182,7 +184,29 @@ def set_mute(node_id, muted):
 # focus helpers
 # --------------------------------------------------------------------------
 
-def focused_pid():
+UNAVAILABLE = object()  # shell helper not answering, as opposed to "no focus"
+
+FOCUS_BUS = "org.kysettings.Focus"
+FOCUS_PATH = "/org/kysettings/Focus"
+
+
+def shell_focused_pid():
+    """Focused PID according to GNOME Shell, or UNAVAILABLE if it can't answer.
+
+    Needs the ky-focus extension. Wayland gives clients no way to ask which
+    window has focus, and GNOME's own Introspect API refuses callers that aren't
+    on its allowlist, so a shell extension is the only source.
+    """
+    out = run(["gdbus", "call", "--session", "--dest", FOCUS_BUS,
+               "--object-path", FOCUS_PATH,
+               "--method", f"{FOCUS_BUS}.GetFocusedPid"])
+    match = re.search(r"\((\d+),?\)", out)
+    if not match:
+        return UNAVAILABLE
+    return int(match.group(1)) or None
+
+
+def x11_focused_pid():
     """PID owning the focused X window, or None (0x0 = a Wayland-native window)."""
     out = run(["xprop", "-root", "_NET_ACTIVE_WINDOW"])
     match = re.search(r"(0x[0-9a-fA-F]+)", out)
@@ -191,6 +215,33 @@ def focused_pid():
     out = run(["xprop", "-id", match.group(1), "_NET_WM_PID"])
     match = re.search(r"=\s*(\d+)", out)
     return int(match.group(1)) if match else None
+
+
+def wayland_focus_enabled():
+    """Whether to consult the shell for focus. Opt-in, off by default.
+
+    The X11 path is the proven one and stays in charge unless this flag is set
+    by Ky Settings, so turning the experiment off restores exactly the previous
+    behaviour with no code path in common.
+    """
+    return WAYLAND_FOCUS_FLAG.exists()
+
+
+def focused_pid():
+    """PID owning the focused window, or None if nothing relevant has focus.
+
+    With the experiment on, the shell is asked first because it is the only
+    thing that can see Wayland-native windows. They never appear in
+    _NET_ACTIVE_WINDOW, which reports 0x0 for them — indistinguishable from
+    "nothing is focused", so a focused Wayland-native game looks unfocused and
+    gets muted while you are playing it. X11 answers everything else, and is
+    still the fallback whenever the shell cannot be reached.
+    """
+    if wayland_focus_enabled():
+        pid = shell_focused_pid()
+        if pid is not UNAVAILABLE:
+            return pid
+    return x11_focused_pid()
 
 
 # --------------------------------------------------------------------------
@@ -242,6 +293,15 @@ def acquire_lock():
     return fd
 
 
+def spawn(cmd):
+    """Start a line-emitting watcher, or None if it can't run."""
+    try:
+        return subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+
+
 def main():
     if not os.environ.get("DISPLAY"):
         os.environ["DISPLAY"] = ":0"
@@ -258,23 +318,38 @@ def main():
     signal.signal(signal.SIGINT, bail)
     signal.signal(signal.SIGHUP, bail)
 
-    log(f"game-auto-mute started, {len(MARKERS)} markers")
+    experimental = wayland_focus_enabled()
+    if experimental and shell_focused_pid() is UNAVAILABLE:
+        log("wayland focus enabled but ky-focus is not answering; using X11")
+        experimental = False
+    log(f"game-auto-mute started, {len(MARKERS)} markers, "
+        f"focus source: {'shell + X11 (experimental)' if experimental else 'X11'}")
     sync()
 
-    spy = subprocess.Popen(
-        ["xprop", "-root", "-spy", "_NET_ACTIVE_WINDOW"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    # Two independent wake-ups: X11 focus changes, and the shell's FocusChanged
+    # for Wayland-native windows. Either may be absent; the poll timeout below
+    # keeps things correct even when both are.
+    watchers = [w for w in (
+        spawn(["xprop", "-root", "-spy", "_NET_ACTIVE_WINDOW"]),
+        spawn(["gdbus", "monitor", "--session", "--dest", FOCUS_BUS])
+        if experimental else None,
+    ) if w is not None]
+
     try:
-        while spy.poll() is None:
-            ready, _, _ = select.select([spy.stdout], [], [], POLL_INTERVAL)
-            if ready:
-                if not spy.stdout.readline():
-                    break
+        while True:
+            live = [w for w in watchers if w.poll() is None]
+            if watchers and not live:
+                break  # every watcher died; nothing left to wait on
+            ready, _, _ = select.select([w.stdout for w in live], [], [],
+                                        POLL_INTERVAL)
+            for stream in ready:
+                if not stream.readline():
+                    # EOF: drop that watcher, keep going on whatever remains.
+                    watchers = [w for w in watchers if w.stdout is not stream]
             sync()
     finally:
-        spy.terminate()
+        for w in watchers:
+            w.terminate()
         restore_all()
 
 
