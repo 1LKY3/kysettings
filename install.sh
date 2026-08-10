@@ -56,6 +56,13 @@ if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
+# Install GNOME Shell extension (Minimize entry in dock right-click menus).
+# Enabling only records the preference — a newly copied extension is not loaded
+# until the next login, which is what the Display page's Restart Session is for.
+mkdir -p ~/.local/share/gnome-shell/extensions
+rm -rf "$HOME/.local/share/gnome-shell/extensions/dash-minimize@ky.local"
+cp -r "extensions/dash-minimize@ky.local" ~/.local/share/gnome-shell/extensions/
+
 # Install icon
 mkdir -p ~/.local/share/icons/hicolor/256x256/apps
 cp icons/com.ky.settings.png ~/.local/share/icons/hicolor/256x256/apps/com.ky.settings.png

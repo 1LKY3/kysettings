@@ -686,6 +686,37 @@ class KySettings(Adw.Application):
 
         page.add(audio_group)
 
+        # Dock group
+        dock_group = Adw.PreferencesGroup()
+        dock_group.set_title("Dock")
+
+        minimize_row = Adw.SwitchRow()
+        minimize_row.set_title("Minimize on Right-Click")
+        pending = (self._is_dash_minimize_enabled() and
+                   not self._is_dash_minimize_loaded())
+        minimize_row.set_subtitle("Log out and back in to load the extension"
+                                  if pending else self.DASH_MINIMIZE_SUBTITLE)
+        minimize_row.set_active(self._is_dash_minimize_enabled())
+        minimize_row.connect("notify::active", self.on_dash_minimize_toggle)
+        dock_group.add(minimize_row)
+        self.dash_minimize_row = minimize_row
+
+        # Only shown while the toggle is on but the shell has not loaded the
+        # extension yet, i.e. between the first switch-on and the next login.
+        pending_row = Adw.ActionRow()
+        pending_row.set_title("Finish Enabling")
+        pending_row.set_subtitle("The extension loads at your next login")
+        pending_btn = Gtk.Button(label="Log Out")
+        pending_btn.set_valign(Gtk.Align.CENTER)
+        pending_btn.add_css_class("destructive-action")
+        pending_btn.connect("clicked", self.on_restart_session)
+        pending_row.add_suffix(pending_btn)
+        pending_row.set_visible(pending)
+        dock_group.add(pending_row)
+        self.dash_minimize_pending_row = pending_row
+
+        page.add(dock_group)
+
         self.stack.add_titled(page, "display", "Display")
 
     def is_pinned_to_dash(self):
@@ -846,6 +877,70 @@ class KySettings(Adw.Application):
             print(f"Failed to {action} Hide Top Bar: {e}")
             row.set_active(not enable)
         row.set_subtitle("Auto-hide the GNOME top bar")
+
+    DASH_MINIMIZE_UUID = "dash-minimize@ky.local"
+    DASH_MINIMIZE_SUBTITLE = "Add a Minimize entry to dock icon right-click menus"
+
+    def _is_dash_minimize_installed(self):
+        """Extension files are on disk (whether or not the shell has loaded them)."""
+        return os.path.isdir(os.path.expanduser(
+            f"~/.local/share/gnome-shell/extensions/{self.DASH_MINIMIZE_UUID}"))
+
+    def _is_dash_minimize_loaded(self):
+        """The running shell knows about the extension, so toggling is live."""
+        try:
+            result = subprocess.run(
+                ["gnome-extensions", "info", self.DASH_MINIMIZE_UUID],
+                capture_output=True, text=True, timeout=5
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _is_dash_minimize_enabled(self):
+        """`gnome-extensions enable` refuses extensions the shell has not scanned
+        yet, so the enabled-extensions key is the state that survives either way:
+        the shell applies it live when loaded, and at the next login when not."""
+        try:
+            settings = Gio.Settings.new("org.gnome.shell")
+            return self.DASH_MINIMIZE_UUID in settings.get_strv("enabled-extensions")
+        except Exception:
+            return False
+
+    def on_dash_minimize_toggle(self, row, _pspec):
+        """Enable or disable the Dash Minimize extension."""
+        if self._initializing:
+            return
+        enable = row.get_active()
+
+        if enable and not self._is_dash_minimize_installed():
+            row.set_subtitle("Not installed — run ./install.sh from the kysettings repo")
+            row.set_active(False)
+            return
+
+        try:
+            settings = Gio.Settings.new("org.gnome.shell")
+            enabled = settings.get_strv("enabled-extensions")
+            if enable and self.DASH_MINIMIZE_UUID not in enabled:
+                enabled.append(self.DASH_MINIMIZE_UUID)
+            elif not enable and self.DASH_MINIMIZE_UUID in enabled:
+                enabled.remove(self.DASH_MINIMIZE_UUID)
+            settings.set_strv("enabled-extensions", enabled)
+
+            disabled = settings.get_strv("disabled-extensions")
+            if enable and self.DASH_MINIMIZE_UUID in disabled:
+                disabled.remove(self.DASH_MINIMIZE_UUID)
+                settings.set_strv("disabled-extensions", disabled)
+        except Exception as e:
+            print(f"Failed to toggle Dash Minimize: {e}")
+            row.set_active(not enable)
+            row.set_subtitle(self.DASH_MINIMIZE_SUBTITLE)
+            return
+
+        pending = enable and not self._is_dash_minimize_loaded()
+        row.set_subtitle("Log out and back in to load the extension"
+                         if pending else self.DASH_MINIMIZE_SUBTITLE)
+        self.dash_minimize_pending_row.set_visible(pending)
 
     def is_game_mute_installed(self):
         """Check if the game auto-mute script is installed."""

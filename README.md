@@ -48,6 +48,29 @@ sudo apt remove python3-gi gir1.2-adw-1 redsocks
 - Pin to dash toggle
 - Window size is remembered between launches
 - Game auto-mute — mutes any running game while its window is not focused, and unmutes it when you come back
+- Minimize on Right-Click — adds a **Minimize** entry to the dock's app icon right-click menu
+
+**Minimize on Right-Click**
+
+Ships a small GNOME Shell extension (`dash-minimize@ky.local`) that adds a Minimize
+item between the window list and Quit in the dock's right-click menu. It minimizes
+every window the app has on the current workspace, including fullscreen Proton/Wine
+games, so a game running borderless can be dropped to the dock without alt-tabbing.
+
+The dock (Ubuntu Dock / Dash to Dock) does not export the class that builds that
+menu, so the extension briefly wraps `PopupMenu.open` to catch the first dock menu,
+takes the class from that instance, and unwraps itself again.
+
+`./install.sh` copies the extension into `~/.local/share/gnome-shell/extensions/`.
+GNOME Shell only scans for new extensions when a session starts, so the first time
+the toggle is switched on a **Finish Enabling** row appears under it with a Log Out
+button. A reboot works too, but nothing outside the session needs restarting — only
+gnome-shell does, and it cannot be restarted in place on Wayland.
+
+After that first login the extension is loaded and the toggle applies immediately,
+in both directions. The toggle writes `org.gnome.shell enabled-extensions` rather
+than shelling out to `gnome-extensions enable`, because that command refuses
+extensions the running shell has not scanned yet.
 
 **Game auto-mute detection**
 

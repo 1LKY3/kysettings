@@ -1,0 +1,7 @@
+{
+  "uuid": "dash-minimize@ky.local",
+  "name": "Dash Minimize",
+  "description": "Adds a Minimize entry to the dock's app icon right-click menu. Toggled from Ky Settings > Display > Dock.",
+  "shell-version": ["45", "46", "47", "48"],
+  "version": 1
+}

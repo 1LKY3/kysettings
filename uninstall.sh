@@ -37,6 +37,10 @@ pkill -f speech-lock 2>/dev/null || true
 rm -f ~/.local/bin/speech-lock
 rm -f ~/.local/bin/bt-reset
 
+# Remove GNOME Shell extension
+gnome-extensions disable dash-minimize@ky.local 2>/dev/null || true
+rm -rf "$HOME/.local/share/gnome-shell/extensions/dash-minimize@ky.local"
+
 # Remove icon
 rm -f ~/.local/share/icons/hicolor/256x256/apps/com.ky.settings.png
 gtk-update-icon-cache ~/.local/share/icons/hicolor/ 2>/dev/null || true
