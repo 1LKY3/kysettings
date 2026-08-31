@@ -505,6 +505,7 @@ window.mountain-theme *:selected {
 # Custom keybinding paths
 KEYBINDING_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings"
 KEYBINDING_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding"
+SCREENSHOT_BINDINGS = ("<Ctrl><Shift>s", "<Shift><Super>s")
 
 class KySettings(Adw.Application):
     def __init__(self):
@@ -1855,9 +1856,22 @@ class KySettings(Adw.Application):
         # Screenshot toggle
         ss_row = Adw.SwitchRow()
         ss_row.set_title("Screenshot")
-        ss_row.set_subtitle("Super + Shift + S takes a screenshot (Windows-style)")
-        ss_row.set_active("<Shift><Super>s" in
-            Gio.Settings.new("org.gnome.shell.keybindings").get_strv("show-screenshot-ui"))
+        ss_row.set_subtitle(
+            "Ctrl + Shift + S or Super + Shift + S opens screenshot selection")
+        screenshot_settings = Gio.Settings.new("org.gnome.shell.keybindings")
+        bindings = list(screenshot_settings.get_strv("show-screenshot-ui"))
+        # Normalize older spellings and ensure both supported shortcuts exist.
+        if "<Control><Shift>s" in bindings:
+            bindings.remove("<Control><Shift>s")
+        changed = False
+        for binding in SCREENSHOT_BINDINGS:
+            if binding not in bindings:
+                bindings.append(binding)
+                changed = True
+        if changed:
+            screenshot_settings.set_strv("show-screenshot-ui", bindings)
+        ss_row.set_active(all(binding in bindings
+                              for binding in SCREENSHOT_BINDINGS))
         ss_row.connect("notify::active", self.on_screenshot_toggle)
         group.add(ss_row)
 
@@ -2225,15 +2239,17 @@ class KySettings(Adw.Application):
 
     def on_screenshot_toggle(self, row, _):
         settings = Gio.Settings.new("org.gnome.shell.keybindings")
-        bindings = settings.get_strv("show-screenshot-ui")
+        bindings = list(settings.get_strv("show-screenshot-ui"))
+        bindings = [binding for binding in bindings
+                    if binding != "<Control><Shift>s"]
         if row.get_active():
-            if "<Shift><Super>s" not in bindings:
-                bindings.append("<Shift><Super>s")
-                settings.set_strv("show-screenshot-ui", bindings)
+            for binding in SCREENSHOT_BINDINGS:
+                if binding not in bindings:
+                    bindings.append(binding)
         else:
-            if "<Shift><Super>s" in bindings:
-                bindings.remove("<Shift><Super>s")
-                settings.set_strv("show-screenshot-ui", bindings)
+            bindings = [binding for binding in bindings
+                        if binding not in SCREENSHOT_BINDINGS]
+        settings.set_strv("show-screenshot-ui", bindings)
 
     # === SPEECH TO TEXT FUNCTIONS ===
     def is_speech_note_installed(self):
