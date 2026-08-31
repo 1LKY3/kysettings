@@ -1,6 +1,19 @@
 #!/bin/bash
 echo "=== KySettings Uninstaller ==="
 
+# Never strand the desktop in Kyle's preset or discard its recovery data.
+# Restore before removing the executable; abort and retain everything if even
+# one captured setting cannot be recovered safely.
+DESKTOP_SNAPSHOT=~/.config/kysettings/desktop-before-kyle.json
+if [ -f "$DESKTOP_SNAPSHOT" ]; then
+    echo "Restoring the desktop state saved before Kyle's Desktop..."
+    if ! ~/.local/bin/kysettings --restore-desktop; then
+        echo "ERROR: Desktop restoration was incomplete."
+        echo "KySettings and its snapshot have been kept so you can retry."
+        exit 1
+    fi
+fi
+
 # Stop any active PDANet proxy
 if [ -f ~/.local/bin/pdanet-proxy ]; then
     sudo ~/.local/bin/pdanet-proxy stop 2>/dev/null || true
@@ -54,8 +67,15 @@ update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
 # Remove the wallpaper bundled exclusively for Kyle's Desktop.
 rm -f ~/.local/share/backgrounds/voidflow-mountains.png
 
-# Remove config/first-run flag
-rm -rf ~/.config/kysettings
+# Remove generated state but preserve user-maintained configuration such as
+# game-mute-markers.txt. A successfully restored desktop snapshot is already
+# removed by KySettings itself.
+rm -f ~/.config/kysettings/.installed
+rm -f ~/.config/kysettings/.ss_cleanup
+rm -f ~/.config/kysettings/window.json
+rm -f ~/.config/kysettings/game-auto-mute.lock
+rm -f ~/.config/kysettings/wayland-focus.enabled
+rmdir ~/.config/kysettings 2>/dev/null || true
 
 # Unpin from dash
 python3 -c "

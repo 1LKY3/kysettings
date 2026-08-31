@@ -44,8 +44,8 @@ sudo apt remove python3-gi gir1.2-adw-1 redsocks
 ## Features
 
 **Display**
-- Kyle's Desktop toggle — ON applies the theme/font/dock set, OFF restores this
-  machine's own defaults
+- Kyle's Desktop toggle — ON snapshots and applies the theme/font/dock set;
+  OFF restores the exact per-user state captured before ON
 - Bundled K1/K2 Voidflow wallpaper, applied by Kyle's Desktop
 - Minimize and Maximize title-bar buttons, applied by Kyle's Desktop
 - Extended screen blank timeout (up to 4 hours)
@@ -163,10 +163,15 @@ install this somewhere else:
   so a machine without dash-to-dock skips those keys and reports them instead of
   crashing.
 
-Turning the toggle OFF resets each key to this install's own default rather than
-to hardcoded values, except for four where the wanted off-state genuinely isn't
-the stock default (`gtk-theme`, `color-scheme`, `monospace-font-name`, and the
-dock's `autohide` — otherwise off would mean a light theme and a hiding dock).
+Turning the toggle OFF does not reset or guess any values. KySettings stores
+whether each key had an explicit user value and its typed GVariant value in
+`~/.config/kysettings/desktop-before-kyle.json`. OFF restores those values and
+removes the snapshot only after a successful restoration. Older installations
+without a snapshot are left unchanged rather than being reset.
+
+The uninstaller restores an active snapshot before removing KySettings. If any
+captured setting cannot be restored, uninstalling stops and keeps both the app
+and snapshot available for a safe retry.
 
 ## Requirements
 

@@ -14,11 +14,13 @@ import sys
 import pathlib
 from datetime import datetime, timedelta
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
-FIRST_RUN_FLAG = pathlib.Path.home() / ".config" / "kysettings" / ".installed"
-SS_CLEANUP_FLAG = pathlib.Path.home() / ".config" / "kysettings" / ".ss_cleanup"
-WINDOW_STATE = pathlib.Path.home() / ".config" / "kysettings" / "window.json"
+CONFIG_DIR = pathlib.Path.home() / ".config" / "kysettings"
+FIRST_RUN_FLAG = CONFIG_DIR / ".installed"
+SS_CLEANUP_FLAG = CONFIG_DIR / ".ss_cleanup"
+WINDOW_STATE = CONFIG_DIR / "window.json"
+DESKTOP_SNAPSHOT = CONFIG_DIR / "desktop-before-kyle.json"
 GAME_MUTE_SCRIPT = os.path.expanduser("~/.local/bin/game-auto-mute.py")
 GAME_MUTE_AUTOSTART = pathlib.Path.home() / ".config" / "autostart" / "game-auto-mute.desktop"
 GAME_MUTE_LOCK = pathlib.Path.home() / ".config" / "kysettings" / "game-auto-mute.lock"
@@ -621,37 +623,28 @@ class KySettings(Adw.Application):
         dialog.add_response("ok", "Got it")
         dialog.present()
 
-    # Sentinel for "restore this install's own default" — see DESKTOP_SETTINGS.
-    _RESET = object()
-
-    # (schema, key, on_value) or (schema, key, on_value, off_value).
-    #
-    # Switching the toggle OFF resets the key by default, so what comes back is
-    # whatever this machine actually ships, vendor overrides included, instead of
-    # one machine's values hardcoded as everyone's "Ubuntu default". A fourth
-    # element is given only for the keys where the wanted off-state is genuinely
-    # not the stock default — without them, off would mean a light theme and an
-    # auto-hiding dock.
+    # (schema, key, Kyle value). Before any of these are changed, their exact
+    # user values are snapshotted. OFF restores that snapshot; it never guesses
+    # at an Ubuntu default or resets a user's customizations.
     DESKTOP_SETTINGS = [
-        # Theme — stock default is light Yaru, but off should still be dark
-        ("org.gnome.desktop.interface", "gtk-theme", "Yaru-sage-dark", "Yaru-dark"),
-        ("org.gnome.desktop.interface", "color-scheme", "prefer-dark", "prefer-dark"),
+        # Theme
+        ("org.gnome.desktop.interface", "gtk-theme", "Yaru-sage-dark"),
+        ("org.gnome.desktop.interface", "color-scheme", "prefer-dark"),
         ("org.gnome.desktop.interface", "icon-theme", "Yaru-sage"),
         ("org.gnome.desktop.interface", "cursor-theme", "Yaru"),
         # Fonts
         ("org.gnome.desktop.interface", "font-name", "Ubuntu Sans 11"),
         ("org.gnome.desktop.interface", "document-font-name", "Sans 11"),
-        ("org.gnome.desktop.interface", "monospace-font-name",
-         "Ubuntu Sans Mono 13", "Ubuntu Mono 13"),
+        ("org.gnome.desktop.interface", "monospace-font-name", "Ubuntu Sans Mono 13"),
         # Window controls — Ubuntu normally exposes only Close. Kyle's layout
         # keeps the standard Minimize and Maximize buttons available too.
         ("org.gnome.desktop.wm.preferences", "button-layout",
          ":minimize,maximize,close"),
         # Wallpaper is appended at runtime — see _wallpaper_uri()
-        # Dock — stock default autohides, which is not wanted either way
+        # Dock
         ("org.gnome.shell.extensions.dash-to-dock", "dock-position", "BOTTOM"),
         ("org.gnome.shell.extensions.dash-to-dock", "dash-max-icon-size", 38),
-        ("org.gnome.shell.extensions.dash-to-dock", "autohide", True, False),
+        ("org.gnome.shell.extensions.dash-to-dock", "autohide", True),
         # Compositor
         ("org.gnome.mutter", "center-new-windows", False),
     ]
@@ -669,7 +662,7 @@ class KySettings(Adw.Application):
 
         desktop_row = Adw.SwitchRow()
         desktop_row.set_title("Kyle's Desktop")
-        desktop_row.set_subtitle("ON = Kyle's settings / OFF = Ubuntu defaults")
+        desktop_row.set_subtitle("OFF restores your exact previous desktop")
         desktop_row.set_active(self._detect_kyle_desktop())
         desktop_row.connect("notify::active", self.on_desktop_toggle)
         desktop_group.add(desktop_row)
@@ -886,17 +879,187 @@ class KySettings(Adw.Application):
         except Exception:
             return False
 
+    def _desktop_setting_keys(self):
+        """Every setting Kyle's Desktop may change."""
+        keys = [(schema, key) for schema, key, _value in self.DESKTOP_SETTINGS]
+        keys += [
+            ("org.gnome.desktop.background", "picture-uri"),
+            ("org.gnome.desktop.background", "picture-uri-dark"),
+            ("org.gnome.desktop.background", "picture-options"),
+        ]
+        return keys
+
+    def _capture_desktop_snapshot(self):
+        """Persist exact pre-Kyle user values before changing anything.
+
+        `get_user_value()` matters here: a key inherited from a vendor default
+        must be restored with reset(), while an explicit user value must be put
+        back as that exact typed GVariant.
+        """
+        if DESKTOP_SNAPSHOT.exists():
+            try:
+                existing = json.loads(DESKTOP_SNAPSHOT.read_text())
+                if existing.get("version") != 1 or not isinstance(
+                        existing.get("settings"), list):
+                    raise ValueError("unsupported or incomplete snapshot")
+                return True, [], []
+            except Exception as e:
+                return False, [], [f"Existing desktop snapshot is invalid: {e}"]
+
+        settings_data = []
+        skipped = []
+        errors = []
+        for schema_id, key in self._desktop_setting_keys():
+            s = self._safe_settings(schema_id)
+            if s is None:
+                skipped.append(f"{schema_id} — not installed")
+                continue
+            if not s.get_property("settings-schema").has_key(key):
+                skipped.append(f"{schema_id} {key} — no such key")
+                continue
+            try:
+                value = s.get_user_value(key)
+                item = {"schema": schema_id, "key": key, "user_set": value is not None}
+                if value is not None:
+                    item["type"] = value.get_type_string()
+                    item["value"] = value.unpack()
+                settings_data.append(item)
+            except Exception as e:
+                errors.append(f"{schema_id} {key}: {e}")
+
+        if errors:
+            return False, skipped, errors
+
+        snapshot = {
+            "version": 1,
+            "settings": settings_data,
+            "dash_minimize_enabled": self._is_dash_minimize_enabled(),
+        }
+        try:
+            DESKTOP_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+            temporary = DESKTOP_SNAPSHOT.with_suffix(".tmp")
+            temporary.write_text(json.dumps(snapshot, indent=2) + "\n")
+            temporary.chmod(0o600)
+            os.replace(temporary, DESKTOP_SNAPSHOT)
+        except Exception as e:
+            return False, skipped, [f"Could not save desktop snapshot: {e}"]
+        return True, skipped, []
+
+    def _restore_desktop_snapshot(self):
+        """Restore the exact pre-Kyle state. Never invent fallback values."""
+        if not DESKTOP_SNAPSHOT.exists():
+            return None, 0, [], ["No pre-Kyle desktop snapshot exists"]
+        try:
+            snapshot = json.loads(DESKTOP_SNAPSHOT.read_text())
+            if snapshot.get("version") != 1:
+                raise ValueError("unsupported snapshot version")
+        except Exception as e:
+            return None, 0, [], [f"Could not read desktop snapshot: {e}"]
+
+        restored = 0
+        skipped = []
+        errors = []
+        for item in snapshot.get("settings", []):
+            schema_id = item.get("schema", "")
+            key = item.get("key", "")
+            s = self._safe_settings(schema_id)
+            if s is None:
+                skipped.append(f"{schema_id} — not installed")
+                continue
+            if not s.get_property("settings-schema").has_key(key):
+                skipped.append(f"{schema_id} {key} — no such key")
+                continue
+            try:
+                if item.get("user_set"):
+                    s.set_value(key, GLib.Variant(item["type"], item["value"]))
+                else:
+                    s.reset(key)
+                restored += 1
+            except Exception as e:
+                errors.append(f"{schema_id} {key}: {e}")
+
+        previous_minimize = bool(snapshot.get("dash_minimize_enabled", False))
+        if self._set_extension_enabled(self.DASH_MINIMIZE_UUID, previous_minimize):
+            restored += 1
+        else:
+            errors.append("Could not restore the Dock Minimize extension")
+
+        if not errors and not skipped:
+            try:
+                DESKTOP_SNAPSHOT.unlink()
+            except Exception as e:
+                errors.append(f"Could not retire restored snapshot: {e}")
+        return previous_minimize, restored, skipped, errors
+
+    def _set_desktop_row_without_notify(self, row, active):
+        """Correct a rejected toggle without recursively handling it."""
+        initializing = self._initializing
+        self._initializing = True
+        try:
+            row.set_active(active)
+        finally:
+            self._initializing = initializing
+
     def on_desktop_toggle(self, row, _pspec):
-        """Toggle Kyle's complete desktop preset, including dock Minimize."""
+        """Apply Kyle's preset or restore the exact captured desktop state."""
         if self._initializing:
             return
         use_kyle = row.get_active()
 
+        if not use_kyle:
+            previous_minimize, restored, skipped, errors = self._restore_desktop_snapshot()
+            if previous_minimize is None:
+                # This covers machines already using Kyle's settings before the
+                # snapshot feature existed. Changing nothing is the only safe
+                # behavior when there is no trustworthy state to restore.
+                self._set_desktop_row_without_notify(row, True)
+                body = ("Nothing was changed. KySettings has no snapshot from before "
+                        "Kyle's Desktop was enabled on this machine, so it will not "
+                        "guess or reset your settings.")
+                heading = "No Previous State Saved"
+            else:
+                if self.dash_minimize_row.get_active() != previous_minimize:
+                    self.dash_minimize_row.set_active(previous_minimize)
+                pending = (previous_minimize and
+                           not self._is_dash_minimize_loaded())
+                self.dash_minimize_row.set_subtitle(
+                    "Log out and back in to load the extension"
+                    if pending else self.DASH_MINIMIZE_SUBTITLE)
+                self.dash_minimize_pending_row.set_visible(pending)
+                parts = [f"Your previous desktop was restored ({restored} settings)."]
+                if skipped:
+                    parts.append(f"{len(skipped)} unavailable settings skipped; "
+                                 "the snapshot was kept for retry:\n" +
+                                 "\n".join(skipped[:5]))
+                if errors:
+                    parts.append(f"{len(errors)} failed; the snapshot was kept for retry:\n" +
+                                 "\n".join(errors[:5]))
+                body = "\n\n".join(parts)
+                heading = "Previous Desktop Restored"
+
+            dialog = Adw.MessageDialog(transient_for=self.win,
+                                       heading=heading, body=body)
+            dialog.add_response("ok", "OK")
+            dialog.present()
+            return
+
+        captured, capture_skipped, capture_errors = self._capture_desktop_snapshot()
+        if not captured:
+            self._set_desktop_row_without_notify(row, False)
+            dialog = Adw.MessageDialog(
+                transient_for=self.win,
+                heading="Desktop Unchanged",
+                body=("Kyle's Desktop was not applied because your current settings "
+                      "could not be saved safely.\n\n" +
+                      "\n".join(capture_errors[:5])),
+            )
+            dialog.add_response("ok", "OK")
+            dialog.present()
+            return
+
         entries = list(self.DESKTOP_SETTINGS)
         wallpaper = self._wallpaper_uri()
-        if wallpaper or not use_kyle:
-            # Switching off only resets these, which is worth doing even on a
-            # machine that never had the wallpaper to begin with.
+        if wallpaper:
             entries += [
                 ("org.gnome.desktop.background", "picture-uri", wallpaper),
                 ("org.gnome.desktop.background", "picture-uri-dark", wallpaper),
@@ -907,9 +1070,7 @@ class KySettings(Adw.Application):
         skipped = []
         errors = []
         for entry in entries:
-            schema_id, key, on_value = entry[:3]
-            off_value = entry[3] if len(entry) > 3 else self._RESET
-            value = on_value if use_kyle else off_value
+            schema_id, key, value = entry
 
             s = self._safe_settings(schema_id)
             if s is None:
@@ -922,9 +1083,7 @@ class KySettings(Adw.Application):
                 skipped.append(f"{schema_id} {key} — no such key")
                 continue
             try:
-                if value is self._RESET:
-                    s.reset(key)
-                elif isinstance(value, bool):  # before int: bool subclasses int
+                if isinstance(value, bool):  # before int: bool subclasses int
                     s.set_boolean(key, value)
                 elif isinstance(value, int):
                     s.set_int(key, value)
@@ -955,13 +1114,14 @@ class KySettings(Adw.Application):
         else:
             errors.append("Could not update the Dock Minimize extension")
 
-        label = "Kyle's settings" if use_kyle else "System defaults"
-        parts = [f"{label} applied ({applied} settings)."]
-        if use_kyle and wallpaper is None:
+        parts = [f"Kyle's settings applied ({applied} settings).",
+                 "Your previous desktop was saved and will be restored by OFF."]
+        if wallpaper is None:
             parts.append(f"Wallpaper unchanged — bundled {self.WALLPAPER_NAME} "
                          "is missing; reinstall KySettings.")
         if minimize_pending:
             parts.append("Dock Minimize will load after you log out and back in.")
+        skipped = capture_skipped + skipped
         if skipped:
             parts.append(f"{len(skipped)} skipped:\n" + "\n".join(skipped[:5]))
         if errors:
@@ -2418,8 +2578,18 @@ class KySettings(Adw.Application):
 
         return True # Keep the timer running
 
-if "--version" in sys.argv:
-    print(f"kysettings {__version__}")
-    sys.exit(0)
-
-KySettings().run(None)
+if __name__ == "__main__":
+    if "--version" in sys.argv:
+        print(f"kysettings {__version__}")
+        sys.exit(0)
+    if "--restore-desktop" in sys.argv:
+        previous_minimize, restored, skipped, errors = (
+            KySettings()._restore_desktop_snapshot())
+        if previous_minimize is None:
+            print("No desktop snapshot was restored.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Restored {restored} pre-Kyle desktop settings.")
+        for detail in skipped + errors:
+            print(detail, file=sys.stderr)
+        sys.exit(1 if skipped or errors else 0)
+    KySettings().run(None)
