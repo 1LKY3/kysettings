@@ -46,6 +46,8 @@ sudo apt remove python3-gi gir1.2-adw-1 redsocks
 **Display**
 - Kyle's Desktop toggle — ON applies the theme/font/dock set, OFF restores this
   machine's own defaults
+- Bundled K1/K2 Voidflow wallpaper, applied by Kyle's Desktop
+- Minimize and Maximize title-bar buttons, applied by Kyle's Desktop
 - Extended screen blank timeout (up to 4 hours)
 - Pin to dash toggle
 - Window size is remembered between launches
@@ -74,6 +76,9 @@ After that first login the extension is loaded and the toggle applies immediatel
 in both directions. The toggle writes `org.gnome.shell enabled-extensions` rather
 than shelling out to `gnome-extensions enable`, because that command refuses
 extensions the running shell has not scanned yet.
+
+Kyle's Desktop enables this extension automatically. The separate Dock switch is
+still available as an override.
 
 **Game auto-mute detection**
 
@@ -149,10 +154,9 @@ pdanet status   # Check current state
 Nothing is tied to one machine's home directory. Two details worth knowing if you
 install this somewhere else:
 
-- **Wallpaper.** The Kyle's Desktop toggle looks for `voidflow-mountains.png` in
-  `~/Pictures/Wallpapers` (then `~/.local/share/backgrounds`). The image is not
-  shipped with the app, so if it isn't there the rest of the theme still applies
-  and your wallpaper is left alone.
+- **Wallpaper.** The K1/K2 `voidflow-mountains.png` image ships with KySettings
+  and is installed in `~/.local/share/backgrounds`. Kyle's Desktop applies it to
+  both light and dark GNOME backgrounds.
 - **Missing schemas are skipped, not fatal.** `Gio.Settings.new()` on a schema
   that isn't installed aborts the process — it is a GLib fatal error that no
   `try`/`except` can catch. Every non-stock schema is therefore looked up first,

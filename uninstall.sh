@@ -51,6 +51,9 @@ gtk-update-icon-cache ~/.local/share/icons/hicolor/ 2>/dev/null || true
 rm -f ~/.local/share/applications/com.ky.settings.desktop
 update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
 
+# Remove the wallpaper bundled exclusively for Kyle's Desktop.
+rm -f ~/.local/share/backgrounds/voidflow-mountains.png
+
 # Remove config/first-run flag
 rm -rf ~/.config/kysettings
 

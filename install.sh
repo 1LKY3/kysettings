@@ -39,6 +39,7 @@ sudo systemctl disable redsocks 2>/dev/null || true
 # Create directories
 mkdir -p ~/.local/bin
 mkdir -p ~/.local/share/applications
+mkdir -p ~/.local/share/backgrounds
 
 # Install main app
 cp kysettings.py ~/.local/bin/kysettings
@@ -91,6 +92,11 @@ gtk-update-icon-cache ~/.local/share/icons/hicolor/ 2>/dev/null || true
 # Install desktop entry
 cp com.ky.settings.desktop ~/.local/share/applications/
 update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
+
+# Install the portable Kyle's Desktop wallpaper. The app points GNOME at this
+# user-owned path when the preset is enabled, so it works on every machine.
+cp backgrounds/voidflow-mountains.png \
+    ~/.local/share/backgrounds/voidflow-mountains.png
 
 echo ""
 echo "Installed successfully!"

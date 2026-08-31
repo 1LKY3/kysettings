@@ -643,6 +643,10 @@ class KySettings(Adw.Application):
         ("org.gnome.desktop.interface", "document-font-name", "Sans 11"),
         ("org.gnome.desktop.interface", "monospace-font-name",
          "Ubuntu Sans Mono 13", "Ubuntu Mono 13"),
+        # Window controls — Ubuntu normally exposes only Close. Kyle's layout
+        # keeps the standard Minimize and Maximize buttons available too.
+        ("org.gnome.desktop.wm.preferences", "button-layout",
+         ":minimize,maximize,close"),
         # Wallpaper is appended at runtime — see _wallpaper_uri()
         # Dock — stock default autohides, which is not wanted either way
         ("org.gnome.shell.extensions.dash-to-dock", "dock-position", "BOTTOM"),
@@ -861,16 +865,11 @@ class KySettings(Adw.Application):
         return Gio.Settings.new(schema_id)
 
     def _wallpaper_uri(self):
-        """URI of the desktop wallpaper, or None if this machine hasn't got it.
-
-        The wallpaper is a personal file that the app does not ship, so it is
-        located relative to the current user's home rather than hardcoded. When
-        it is missing the rest of the theme still applies and the wallpaper is
-        left alone, instead of pointing GNOME at a path that exists on exactly
-        one machine."""
+        """URI of the installed Kyle's Desktop wallpaper, if present."""
         candidates = [
-            os.path.join(GLib.get_home_dir(), "Pictures", "Wallpapers", self.WALLPAPER_NAME),
             os.path.join(GLib.get_user_data_dir(), "backgrounds", self.WALLPAPER_NAME),
+            # Compatibility with installs made before the wallpaper was bundled.
+            os.path.join(GLib.get_home_dir(), "Pictures", "Wallpapers", self.WALLPAPER_NAME),
         ]
         for path in candidates:
             if os.path.isfile(path):
@@ -888,7 +887,7 @@ class KySettings(Adw.Application):
             return False
 
     def on_desktop_toggle(self, row, _pspec):
-        """Toggle between Kyle's desktop settings and this system's defaults."""
+        """Toggle Kyle's complete desktop preset, including dock Minimize."""
         if self._initializing:
             return
         use_kyle = row.get_active()
@@ -935,11 +934,34 @@ class KySettings(Adw.Application):
             except Exception as e:
                 errors.append(f"{schema_id} {key}: {e}")
 
+        # The extension is installed with KySettings. Write GNOME Shell's
+        # enabled list directly so this also works before the running shell has
+        # discovered a brand-new extension; it will load at the next login.
+        minimize_pending = False
+        if not self._is_extension_installed(self.DASH_MINIMIZE_UUID):
+            if use_kyle:
+                errors.append("Dock Minimize extension is not installed")
+        elif self._set_extension_enabled(self.DASH_MINIMIZE_UUID, use_kyle):
+            applied += 1
+            minimize_pending = use_kyle and not self._is_dash_minimize_loaded()
+            # Keep the dedicated override row in sync without changing the
+            # meaning of its handler when a user operates it directly.
+            if self.dash_minimize_row.get_active() != use_kyle:
+                self.dash_minimize_row.set_active(use_kyle)
+            self.dash_minimize_row.set_subtitle(
+                "Log out and back in to load the extension"
+                if minimize_pending else self.DASH_MINIMIZE_SUBTITLE)
+            self.dash_minimize_pending_row.set_visible(minimize_pending)
+        else:
+            errors.append("Could not update the Dock Minimize extension")
+
         label = "Kyle's settings" if use_kyle else "System defaults"
         parts = [f"{label} applied ({applied} settings)."]
         if use_kyle and wallpaper is None:
-            parts.append(f"Wallpaper unchanged — no {self.WALLPAPER_NAME} "
-                         f"in ~/Pictures/Wallpapers.")
+            parts.append(f"Wallpaper unchanged — bundled {self.WALLPAPER_NAME} "
+                         "is missing; reinstall KySettings.")
+        if minimize_pending:
+            parts.append("Dock Minimize will load after you log out and back in.")
         if skipped:
             parts.append(f"{len(skipped)} skipped:\n" + "\n".join(skipped[:5]))
         if errors:
