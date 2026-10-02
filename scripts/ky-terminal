@@ -1,0 +1,184 @@
+#!/usr/bin/python3
+"""Reversible Ubuntu terminal selection. Root work is restricted to --system."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+LX = '/usr/bin/lxterminal'
+SYSTEM = Path('/var/lib/kysettings/terminal-before.json')
+EXTENSION = Path('/usr/share/nautilus-python/extensions/kysettings-terminal.py')
+USER = Path.home() / '.config/kysettings/terminal-before.json'
+
+
+def run(*args):
+    p = subprocess.run(args, text=True, capture_output=True)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip() or p.stdout.strip() or f'{args[0]} failed')
+    return p.stdout.strip()
+
+
+def save(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(data, indent=2) + '\n')
+    tmp.replace(path)
+
+
+def alternative():
+    return dict(line.split(': ', 1) for line in
+                run('/usr/bin/update-alternatives', '--query', 'x-terminal-emulator').splitlines()
+                if ': ' in line and not line.startswith(' '))
+
+
+def restore_system(state):
+    for filename in state['extensions']:
+        diverted = filename + '.kysettings-disabled'
+        target = run('/usr/bin/dpkg-divert', '--truename', filename)
+        if target == diverted:
+            run('/usr/bin/dpkg-divert', '--local', '--rename', '--remove',
+                '--divert', diverted, filename)
+    old = state['alternative']
+    args = ['--auto', 'x-terminal-emulator'] if old['Status'] == 'auto' else [
+        '--set', 'x-terminal-emulator', old['Value']]
+    run('/usr/bin/update-alternatives', *args)
+    EXTENSION.unlink(missing_ok=True)
+
+
+def system(action):
+    if os.geteuid() != 0:
+        raise RuntimeError('System terminal selection requires administrator authentication.')
+    SYSTEM.parent.mkdir(parents=True, exist_ok=True)
+    with (SYSTEM.parent / 'terminal.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if action == 'disable':
+            if SYSTEM.exists():
+                restore_system(json.loads(SYSTEM.read_text()))
+                SYSTEM.unlink()
+            return
+        if not Path(LX).is_file():
+            raise RuntimeError('Install LXTerminal before enabling this setting.')
+        run('/usr/bin/apt-get', 'install', '-y', 'python3-nautilus', 'xdg-terminal-exec')
+        # A permanent XDG entry delegates to the Debian alternative, including
+        # after OFF. This also gives Noble's otherwise empty XDG registry a
+        # working fallback. No terminal executable is shadowed or replaced.
+        entry = ('[Desktop Entry]\nType=Application\nName=System Terminal\n'
+                 'Exec=/usr/bin/x-terminal-emulator\nTryExec=/usr/bin/x-terminal-emulator\n'
+                 'Terminal=false\nNoDisplay=true\nCategories=TerminalEmulator;\n'
+                 'X-ExecArg=-e\nX-TerminalArgExec=-e\n')
+        for directory in ('/usr/share/xdg-terminals', '/usr/share/applications'):
+            path = Path(directory) / 'ky-default-terminal.desktop'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(entry)
+            path.chmod(0o644)
+        if not SYSTEM.exists():
+            if EXTENSION.exists():
+                raise RuntimeError('An unmanaged KySettings Files extension already exists.')
+            extensions = sorted(str(p) for p in Path('/usr/lib').glob(
+                '*/nautilus/extensions-4/libterminal-nautilus.so'))
+            for filename in extensions:
+                if run('/usr/bin/dpkg-divert', '--truename', filename) != filename:
+                    raise RuntimeError('The GNOME Terminal extension already has a diversion.')
+            save(SYSTEM, {'alternative': alternative(), 'extensions': extensions})
+        state = json.loads(SYSTEM.read_text())
+        try:
+            source = Path(__file__).resolve().parent.parent / 'nautilus/ky-terminal.py'
+            if not source.exists():
+                source = Path(__file__).resolve().parent.parent / 'share/kysettings/ky-terminal-nautilus.py'
+            EXTENSION.parent.mkdir(parents=True, exist_ok=True)
+            EXTENSION.write_text(source.read_text())
+            EXTENSION.chmod(0o644)
+            for filename in state['extensions']:
+                if run('/usr/bin/dpkg-divert', '--truename', filename) == filename:
+                    run('/usr/bin/dpkg-divert', '--local', '--rename', '--add',
+                        '--divert', filename + '.kysettings-disabled', filename)
+            run('/usr/bin/update-alternatives', '--set', 'x-terminal-emulator', LX)
+        except Exception:
+            restore_system(state)
+            SYSTEM.unlink()
+            raise
+
+
+def xdg_configs():
+    directory = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config')))
+    names = {'xdg-terminals.list', 'ubuntu-xdg-terminals.list', 'gnome-xdg-terminals.list'}
+    names.update(f'{d.lower()}-xdg-terminals.list' for d in
+                 os.environ.get('XDG_CURRENT_DESKTOP', '').split(':') if d and '/' not in d)
+    return [directory / n for n in sorted(names)]
+
+
+def settings():
+    from gi.repository import Gio
+    return Gio.Settings.new('org.gnome.desktop.default-applications.terminal')
+
+
+def enabled():
+    return (Path('/usr/bin/x-terminal-emulator').resolve() == Path(LX)
+            and settings().get_string('exec') in ('x-terminal-emulator', LX, 'lxterminal')
+            and Path('/usr/bin/xdg-terminal-exec').exists()
+            and all(p.exists() and p.read_text().splitlines()[0:1] == ['ky-default-terminal.desktop'] for p in xdg_configs())
+            and SYSTEM.exists() and EXTENSION.exists()
+            and not any(Path('/usr/lib').glob('*/nautilus/extensions-4/libterminal-nautilus.so')))
+
+
+def user(action):
+    from gi.repository import Gio, GLib
+    USER.parent.mkdir(parents=True, exist_ok=True)
+    with (USER.parent / 'terminal.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        s = settings()
+        if action == 'enable' and not USER.exists():
+            save(USER, {k: v.print_(True) if (v := s.get_user_value(k)) is not None else None
+                        for k in ('exec', 'exec-arg')})
+        if action == 'enable':
+            snapshot = json.loads(USER.read_text())
+            if 'xdg_files' not in snapshot:
+                snapshot['xdg_files'] = {str(p): p.read_text() if p.exists() else None
+                                         for p in xdg_configs()}
+                save(USER, snapshot)
+        if action == 'disable' and not USER.exists():
+            raise RuntimeError('No previous terminal snapshot exists; nothing was reset.')
+        run('/usr/bin/pkexec', '/usr/bin/python3', str(Path(__file__).resolve()), '--system', action)
+        if action == 'enable':
+            for path in xdg_configs():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('ky-default-terminal.desktop\n')
+            for key, value in [('exec', 'x-terminal-emulator'), ('exec-arg', '-e')]:
+                if not s.set_string(key, value):
+                    raise RuntimeError(f'Could not write terminal {key}; snapshot retained.')
+        else:
+            snapshot = json.loads(USER.read_text())
+            for filename, contents in snapshot.pop('xdg_files', {}).items():
+                path = Path(filename)
+                if contents is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(contents)
+            for key, value in snapshot.items():
+                if value is None:
+                    s.reset(key)
+                elif not s.set_value(key, GLib.Variant.parse(None, value, None, None)):
+                    raise RuntimeError(f'Could not restore {key}; snapshot retained.')
+        Gio.Settings.sync()
+        if action == 'disable':
+            USER.unlink()
+        print('LXTerminal enabled.' if action == 'enable' else 'Previous terminal restored.')
+        print('Close Files windows and reopen Files to reload its terminal menu.')
+
+
+if __name__ == '__main__':
+    try:
+        args = sys.argv[1:]
+        if args == ['status']:
+            print('enabled' if enabled() else 'disabled')
+        elif len(args) == 2 and args[0] == '--system' and args[1] in ('enable', 'disable'):
+            system(args[1])
+        elif args in (['enable'], ['disable']):
+            user(args[0])
+        else:
+            raise RuntimeError('Usage: ky-terminal enable|disable|status')
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)

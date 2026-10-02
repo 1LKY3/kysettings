@@ -1,0 +1,23 @@
+#!/usr/bin/python3
+"""Open the shared GNOME monitor menu; no background process or window policy."""
+from gi.repository import Gio, GLib
+try:
+    Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+        'org.gnome.Shell', '/org/gnome/Shell/Extensions/WorkspaceMonitor',
+        'org.gnome.Shell.Extensions.WorkspaceMonitor', 'Open', None, None,
+        Gio.DBusCallFlags.NONE, 5000, None)
+except GLib.Error:
+    import gi
+    gi.require_version('Gtk', '4.0')
+    gi.require_version('Adw', '1')
+    from gi.repository import Gtk, Adw
+    app = Adw.Application(application_id='com.ky.WorkspaceMonitor')
+    def activate(application):
+        win = Adw.ApplicationWindow(application=application, title='Workspace Monitor', default_width=440, default_height=240)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=24, margin_bottom=24, margin_start=24, margin_end=24)
+        box.append(Gtk.Label(label='Workspace Monitor is not active', css_classes=['title-2']))
+        box.append(Gtk.Label(label='The monitor menu needs the prepared GNOME extension. If you just installed the MVP, save your work and log out and back in to finish loading it.', wrap=True))
+        button = Gtk.Button(label='Close'); button.connect('clicked', lambda _: win.close()); box.append(button)
+        win.set_content(box); win.present()
+    app.connect('activate', activate)
+    app.run(None)

@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+"""Command-line access to the same preset engine used by KySettings."""
+from pathlib import Path
+import sys
+source = Path(__file__).resolve().parent.parent
+if (source / 'ky_desktop.py').exists():
+    sys.path.insert(0, str(source))
+from ky_desktop import main
+try:
+    sys.exit(main(sys.argv[1:]))
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)

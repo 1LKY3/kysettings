@@ -1,0 +1,137 @@
+#!/usr/bin/python3
+"""Persist and immediately apply the Keychron K4 Super mapping. Run via pkexec."""
+
+import contextlib
+import errno
+import fcntl
+import os
+from pathlib import Path
+import struct
+import subprocess
+import sys
+import tempfile
+
+RULE = Path('/etc/udev/hwdb.d/90-keychron-super.hwdb')
+MATCH = 'evdev:input:b0003v05ACp024F*'
+BODY = MATCH + '\n KEYBOARD_KEY_700e3=rightmeta\n'
+INPUT = Path('/sys/class/input')
+GET_KEY = 0x80084504
+SET_KEY = 0x40084504
+SCAN = 0x700e3
+
+
+def read_rule():
+    try:
+        return RULE.read_text()
+    except FileNotFoundError:
+        return None
+
+
+def enabled():
+    content = read_rule()
+    if content is None:
+        return False
+    lines = [line.strip() for line in content.splitlines()
+             if line.strip() and not line.lstrip().startswith('#')]
+    if lines != [MATCH, 'KEYBOARD_KEY_700e3=rightmeta']:
+        raise RuntimeError('The Keychron mapping file contains custom changes. '
+                           'It has been left untouched.')
+    return True
+
+
+def write_rule(content):
+    if content is None:
+        RULE.unlink(missing_ok=True)
+        return
+    fd, name = tempfile.mkstemp(prefix='.keychron-super-', dir=RULE.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(content)
+            os.fchmod(stream.fileno(), 0o644)
+        os.replace(name, RULE)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def rebuild():
+    subprocess.run(['systemd-hwdb', 'update'], check=True,
+                   capture_output=True, text=True, timeout=30)
+
+
+def keycode(fd):
+    data = bytearray(struct.pack('II', SCAN, 0))
+    fcntl.ioctl(fd, GET_KEY, data, True)
+    return struct.unpack('II', data)[1]
+
+
+def set_keycode(fd, code):
+    fcntl.ioctl(fd, SET_KEY, struct.pack('II', SCAN, code))
+    if keycode(fd) != code:
+        raise RuntimeError('The keyboard did not accept the Super mapping.')
+
+
+def apply(wanted):
+    enabled()  # Refuse to overwrite an unrelated/customized rule.
+    original = read_rule()
+    with contextlib.ExitStack() as stack:
+        devices = []
+        for device in INPUT.glob('event*'):
+            try:
+                if not (device / 'device/modalias').read_text().startswith(
+                        'input:b0003v05ACp024F'):
+                    continue
+                fd = os.open('/dev/input/' + device.name, os.O_RDWR | os.O_NONBLOCK)
+            except FileNotFoundError:  # Device unplugged while scanning.
+                continue
+            stack.callback(os.close, fd)
+            try:
+                old = keycode(fd)
+            except OSError as exc:
+                if exc.errno == errno.EINVAL:  # Consumer-control interface.
+                    continue
+                raise
+            if old not in (125, 126):
+                raise RuntimeError('The keyboard has a custom Super mapping; '
+                                   'it has been left untouched.')
+            devices.append((fd, old))
+
+        try:
+            write_rule(BODY if wanted else None)
+            rebuild()
+            for fd, old in devices:
+                set_keycode(fd, 126 if wanted else 125)
+        except Exception as exc:
+            errors = []
+            try:
+                write_rule(original)
+                rebuild()
+            except Exception as rollback_error:
+                errors.append(str(rollback_error))
+            for fd, old in devices:
+                try:
+                    set_keycode(fd, old)
+                except Exception as rollback_error:
+                    errors.append(str(rollback_error))
+            if errors:
+                raise RuntimeError(f'{exc}\nRestoring the previous mapping failed: '
+                                   + '; '.join(errors)) from exc
+            raise
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in ('status', 'enable', 'disable'):
+        raise RuntimeError('Usage: keychron-super status|enable|disable')
+    if sys.argv[1] == 'status':
+        print('enabled' if enabled() else 'disabled')
+    else:
+        if os.geteuid() != 0:
+            raise RuntimeError('Administrator authentication is required.')
+        apply(sys.argv[1] == 'enable')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)

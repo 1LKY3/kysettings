@@ -53,7 +53,7 @@ def is_terminal(wid):
             capture_output=True, text=True, timeout=2
         )
         wm_class = result.stdout.lower()
-        terminals = ["gnome-terminal", "terminator", "xterm", "konsole",
+        terminals = ["lxterminal", "gnome-terminal", "terminator", "xterm", "konsole",
                       "tilix", "alacritty", "kitty", "xfce4-terminal"]
         return any(t in wm_class for t in terminals)
     except Exception:

@@ -14,6 +14,21 @@ if [ -f "$DESKTOP_SNAPSHOT" ]; then
     fi
 fi
 
+# Restore the terminal before removing its helper or recovery state.
+if [ -f ~/.config/kysettings/terminal-before.json ]; then
+    if ! ~/.local/bin/ky-terminal disable; then
+        echo "ERROR: Terminal restoration failed; keeping KySettings for retry."
+        exit 1
+    fi
+fi
+rm -f ~/.local/bin/ky-terminal
+rm -f ~/.local/share/kysettings/ky-terminal-nautilus.py
+
+# Remove the Copy Path Files extension and its toggle state.
+rm -f ~/.local/share/nautilus-python/extensions/ky-copy-path.py
+rmdir ~/.local/share/nautilus-python/extensions 2>/dev/null || true
+rm -f ~/.config/kysettings/copy-path.enabled
+
 # Stop any active PDANet proxy
 if [ -f ~/.local/bin/pdanet-proxy ]; then
     sudo ~/.local/bin/pdanet-proxy stop 2>/dev/null || true
@@ -40,6 +55,8 @@ sudo rm -f /etc/apt/apt.conf.d/99pdanet-proxy 2>/dev/null || true
 
 # Remove binaries
 rm -f ~/.local/bin/kysettings
+rm -f ~/.local/bin/ky_desktop.py
+rm -f ~/.local/bin/ky-desktop
 rm -f ~/.local/bin/pdanet-proxy
 rm -f ~/.local/bin/pdanet
 pkill -f game-auto-mute 2>/dev/null || true
@@ -49,6 +66,9 @@ rm -f ~/.local/bin/minecraft-auto-mute.sh
 pkill -f speech-lock 2>/dev/null || true
 rm -f ~/.local/bin/speech-lock
 rm -f ~/.local/bin/bt-reset
+rm -f ~/.local/bin/keychron-super
+# Keep the user's persistent keyboard preference when removing the app.
+# Turn off Keyboard > Keychron Super Key before uninstalling to restore it.
 
 # Remove GNOME Shell extensions
 for uuid in dash-minimize@ky.local ky-focus@ky.local; do
@@ -91,7 +111,10 @@ echo ""
 echo "KySettings has been removed."
 echo ""
 echo "The following packages were installed as dependencies and are still present:"
-echo "  python3-gi  gir1.2-adw-1  redsocks"
+echo "  python3-gi  gir1.2-adw-1  redsocks  python3-nautilus"
 echo ""
 echo "To remove them manually if no longer needed:"
-echo "  sudo apt remove python3-gi gir1.2-adw-1 redsocks"
+echo "  sudo apt remove python3-gi gir1.2-adw-1 redsocks python3-nautilus"
+
+# Shared workspace-target menu launcher (the separately installed MVP has its own undo).
+rm -f ~/.local/bin/workspace-monitor

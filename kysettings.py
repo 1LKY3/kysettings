@@ -7,26 +7,45 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, Gdk, Gio, GLib
 import subprocess
 import fcntl
+import hashlib
 import json
 import os
 import signal
 import sys
+import tarfile
+import tempfile
+import threading
+import urllib.request
 import pathlib
+import ky_desktop
 from datetime import datetime, timedelta
 
-__version__ = "0.3.0"
+__version__ = "0.4.6"
+UPDATE_MANIFEST_URL = "https://kysettings.dustforge.com/latest.json"
+
+
+def _version_tuple(value):
+    parts = []
+    for piece in str(value).split("."):
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
 
 CONFIG_DIR = pathlib.Path.home() / ".config" / "kysettings"
 FIRST_RUN_FLAG = CONFIG_DIR / ".installed"
 SS_CLEANUP_FLAG = CONFIG_DIR / ".ss_cleanup"
 WINDOW_STATE = CONFIG_DIR / "window.json"
-DESKTOP_SNAPSHOT = CONFIG_DIR / "desktop-before-kyle.json"
 GAME_MUTE_SCRIPT = os.path.expanduser("~/.local/bin/game-auto-mute.py")
 GAME_MUTE_AUTOSTART = pathlib.Path.home() / ".config" / "autostart" / "game-auto-mute.desktop"
 GAME_MUTE_LOCK = pathlib.Path.home() / ".config" / "kysettings" / "game-auto-mute.lock"
 # Presence opts the daemon into the experimental shell-backed focus source.
 GAME_MUTE_WAYLAND_FLAG = (
     pathlib.Path.home() / ".config" / "kysettings" / "wayland-focus.enabled")
+# Files integration. The extension is installed inert and reads the flag at
+# menu time, so the toggle applies without restarting Files.
+COPY_PATH_FLAG = CONFIG_DIR / "copy-path.enabled"
+COPY_PATH_EXTENSION = (
+    pathlib.Path.home() / ".local/share/nautilus-python/extensions/ky-copy-path.py")
 
 # Written verbatim by the in-app Install button. Keep in sync with
 # scripts/game-auto-mute, which install.sh copies into ~/.local/bin.
@@ -574,10 +593,12 @@ class KySettings(Adw.Application):
 
         box.append(self.stack)
         self.win.set_content(box)
+        self._wire_desktop_refresh()
+        self.win.connect("notify::is-active", self._queue_desktop_refresh)
         self.win.present()
+        self._refresh_desktop_status()
 
         if not FIRST_RUN_FLAG.exists():
-            self.pin_to_dash()
             self.show_welcome()
             FIRST_RUN_FLAG.parent.mkdir(parents=True, exist_ok=True)
             FIRST_RUN_FLAG.touch()
@@ -599,73 +620,340 @@ class KySettings(Adw.Application):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
-    def pin_to_dash(self):
-        """Pin app to GNOME dash on first run."""
-        try:
-            settings = Gio.Settings.new("org.gnome.shell")
-            favorites = list(settings.get_strv("favorite-apps"))
-            if "com.ky.settings.desktop" not in favorites:
-                favorites.append("com.ky.settings.desktop")
-                settings.set_strv("favorite-apps", favorites)
-        except Exception as e:
-            print(f"Could not pin to dash: {e}")
-
     def show_welcome(self):
         dialog = Adw.MessageDialog(
             transient_for=self.win,
             heading="Welcome to Ky Settings",
             body=(
-                "Ky Settings has been pinned to your dash.\n\n"
-                "To remove it, open the Display page and toggle "
-                "\"Pin to Dash\" off."
+                "Enable Kyle's Desktop on the Display page to apply your complete preset.\n\n"
+                "Your previous setup will be saved for restoration. "
+                "Individual settings remain available below and on the other pages."
             ),
         )
         dialog.add_response("ok", "Got it")
         dialog.present()
 
-    # (schema, key, Kyle value). Before any of these are changed, their exact
-    # user values are snapshotted. OFF restores that snapshot; it never guesses
-    # at an Ubuntu default or resets a user's customizations.
-    DESKTOP_SETTINGS = [
-        # Theme
-        ("org.gnome.desktop.interface", "gtk-theme", "Yaru-sage-dark"),
-        ("org.gnome.desktop.interface", "color-scheme", "prefer-dark"),
-        ("org.gnome.desktop.interface", "icon-theme", "Yaru-sage"),
-        ("org.gnome.desktop.interface", "cursor-theme", "Yaru"),
-        # Fonts
-        ("org.gnome.desktop.interface", "font-name", "Ubuntu Sans 11"),
-        ("org.gnome.desktop.interface", "document-font-name", "Sans 11"),
-        ("org.gnome.desktop.interface", "monospace-font-name", "Ubuntu Sans Mono 13"),
-        # Window controls — Ubuntu normally exposes only Close. Kyle's layout
-        # keeps the standard Minimize and Maximize buttons available too.
-        ("org.gnome.desktop.wm.preferences", "button-layout",
-         ":minimize,maximize,close"),
-        # Wallpaper is appended at runtime — see _wallpaper_uri()
-        # Dock
-        ("org.gnome.shell.extensions.dash-to-dock", "dock-position", "BOTTOM"),
-        ("org.gnome.shell.extensions.dash-to-dock", "dash-max-icon-size", 38),
-        ("org.gnome.shell.extensions.dash-to-dock", "autohide", True),
-        # Compositor
-        ("org.gnome.mutter", "center-new-windows", False),
-    ]
+    def _terminal_helper(self):
+        source = pathlib.Path(__file__).resolve().parent / "scripts/ky-terminal"
+        return str(source if source.exists() else
+                   pathlib.Path.home() / ".local/bin/ky-terminal")
 
-    WALLPAPER_NAME = "voidflow-mountains.png"
+    def _refresh_terminal(self):
+        row = self.terminal_row
+        try:
+            result = subprocess.run(
+                ["/usr/bin/python3", self._terminal_helper(), "status"],
+                capture_output=True, text=True, timeout=5)
+            if result.returncode:
+                raise RuntimeError(result.stderr.strip())
+            row.handler_block(self._terminal_handler)
+            try:
+                row.set_active(result.stdout.strip() == "enabled")
+            finally:
+                row.handler_unblock(self._terminal_handler)
+            row.set_sensitive(True)
+            row.set_subtitle("Terminal shortcuts and Files. Applies system-wide; "
+                             "OFF restores the previous choice. Administrator authentication required.")
+        except Exception as exc:
+            row.set_sensitive(False)
+            row.set_subtitle(f"Could not read terminal setting: {exc}")
+
+    def on_terminal_toggle(self, row, _):
+        row.set_sensitive(False)
+        row.set_subtitle("Applying terminal choice; administrator authentication may be requested…")
+        try:
+            process = Gio.Subprocess.new(
+                ["/usr/bin/python3", self._terminal_helper(),
+                 "enable" if row.get_active() else "disable"],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+            self.hold()
+            process.communicate_utf8_async(None, None, self._terminal_done)
+        except GLib.Error as exc:
+            self._refresh_terminal()
+            self.terminal_row.set_subtitle(str(exc))
+
+    def _terminal_done(self, process, result):
+        try:
+            _, stdout, stderr = process.communicate_utf8_finish(result)
+            self._refresh_terminal()
+            self._refresh_desktop_status()
+            if process.get_successful():
+                self.terminal_row.set_subtitle(stdout.strip())
+            else:
+                dialog = Adw.MessageDialog(transient_for=self.win,
+                    heading="Terminal Change Failed",
+                    body=stderr.strip() or "The change was cancelled. Previous settings are saved for retry.")
+                dialog.add_response("ok", "OK")
+                dialog.present()
+        finally:
+            self.release()
+
+    CHROME_AGENT_SCRIPT = pathlib.Path.home() / ".local/share/chrome-agent/chrome-agent.sh"
+    CHROME_AGENT_FLAG = pathlib.Path.home() / ".config/chrome-agent/enabled"
+    CHROME_AGENT_SUBTITLE = ("Mirror your Chrome logins into a debug copy the opencode "
+                             "agent can drive; OFF closes it, wipes the copy and blocks access")
+    REFRESH_BROWSERS_SUBTITLE = ("Restart Chrome into the debug browser, restoring your "
+                                 "tabs and anchored windows")
+
+    def _chrome_agent_enabled(self):
+        return self.CHROME_AGENT_FLAG.exists()
+
+    def _refresh_chrome_agent(self):
+        row = self.chrome_agent_row
+        row.handler_block(self._chrome_agent_handler)
+        try:
+            row.set_active(self._chrome_agent_enabled())
+        finally:
+            row.handler_unblock(self._chrome_agent_handler)
+        if self.CHROME_AGENT_SCRIPT.exists():
+            row.set_sensitive(True)
+            row.set_subtitle(self.CHROME_AGENT_SUBTITLE)
+        else:
+            row.set_sensitive(False)
+            row.set_subtitle("Not installed — chrome-agent is missing from ~/.local/share")
+        button = getattr(self, "refresh_button", None)
+        if button is not None:
+            button.set_sensitive(row.get_active() and self.CHROME_AGENT_SCRIPT.exists())
+
+    def on_chrome_agent_toggle(self, row, _pspec):
+        if self._initializing:
+            return
+        row.set_sensitive(False)
+        row.set_subtitle("Applying Chrome agent access…")
+        action = "enable" if row.get_active() else "disable"
+        try:
+            process = Gio.Subprocess.new(
+                [str(self.CHROME_AGENT_SCRIPT), action],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+            self.hold()
+            process.communicate_utf8_async(None, None, self._chrome_agent_done)
+        except GLib.Error as exc:
+            self._refresh_chrome_agent()
+            row.set_subtitle(str(exc))
+
+    def _chrome_agent_done(self, process, result):
+        try:
+            _, stdout, stderr = process.communicate_utf8_finish(result)
+            self._refresh_chrome_agent()
+            if not process.get_successful():
+                dialog = Adw.MessageDialog(transient_for=self.win,
+                    heading="Chrome Agent Change Failed",
+                    body=stderr.strip() or "The change did not complete.")
+                dialog.add_response("ok", "OK")
+                dialog.present()
+        finally:
+            self.release()
+
+    def _refresh_update_row(self):
+        self.update_row.set_subtitle(f"Version {__version__}")
+        self.update_button.set_sensitive(True)
+
+    def on_check_updates(self, _button):
+        self.update_button.set_sensitive(False)
+        self.update_row.set_subtitle(f"Version {__version__} — checking…")
+        threading.Thread(target=self._check_updates_worker, daemon=True).start()
+
+    def _check_updates_worker(self):
+        try:
+            with urllib.request.urlopen(UPDATE_MANIFEST_URL, timeout=15) as response:
+                manifest = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            GLib.idle_add(self._updates_failed, f"Could not check for updates: {exc}")
+            return
+        version = str(manifest.get("version", "")).strip()
+        if not version:
+            GLib.idle_add(self._updates_failed, "The update manifest is missing a version.")
+            return
+        if _version_tuple(version) <= _version_tuple(__version__):
+            GLib.idle_add(self._updates_latest, version)
+            return
+        GLib.idle_add(self._updates_available, manifest)
+
+    def _updates_latest(self, version):
+        self.update_button.set_sensitive(True)
+        self.update_row.set_subtitle(f"Version {__version__} — up to date")
+
+    def _updates_failed(self, message):
+        self.update_button.set_sensitive(True)
+        self.update_row.set_subtitle(f"Version {__version__}")
+        dialog = Adw.MessageDialog(transient_for=self.win,
+            heading="Update Check Failed", body=message)
+        dialog.add_response("ok", "OK")
+        dialog.present()
+
+    def _updates_available(self, manifest):
+        self.update_button.set_sensitive(True)
+        self.update_row.set_subtitle(f"Version {__version__} — {manifest['version']} available")
+        notes = str(manifest.get("notes", "")).strip() or "A new version is ready to install."
+        dialog = Adw.MessageDialog(transient_for=self.win,
+            heading=f"Ky Settings {manifest['version']} is available", body=notes)
+        dialog.add_response("later", "Later")
+        dialog.add_response("install", "Install Update")
+        dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self._on_update_response, manifest)
+        dialog.present()
+
+    def _on_update_response(self, _dialog, response, manifest):
+        if response != "install":
+            return
+        self.update_button.set_sensitive(False)
+        self.update_row.set_subtitle("Downloading update…")
+        threading.Thread(target=self._install_update_worker, args=(manifest,), daemon=True).start()
+
+    def _install_update_worker(self, manifest):
+        try:
+            url = manifest["url"]
+            expected = str(manifest.get("sha256", "")).lower()
+            with urllib.request.urlopen(url, timeout=180) as response:
+                payload = response.read()
+            digest = hashlib.sha256(payload).hexdigest()
+            if expected and digest != expected:
+                raise RuntimeError("Downloaded release failed its checksum")
+            workdir = pathlib.Path(tempfile.mkdtemp(prefix="kysettings-update-"))
+            archive = workdir / "release.tar.gz"
+            archive.write_bytes(payload)
+            extract_dir = workdir / "src"
+            extract_dir.mkdir()
+            with tarfile.open(archive) as tar:
+                tar.extractall(extract_dir, filter="data")
+            entries = [entry for entry in extract_dir.iterdir() if entry.is_dir()]
+            root = entries[0] if len(entries) == 1 else extract_dir
+            installer = root / "install.sh"
+            if not installer.exists():
+                raise RuntimeError("Release archive has no installer")
+            GLib.idle_add(self.update_row.set_subtitle, "Installing update…")
+            environment = dict(os.environ, KYSETTINGS_NO_LAUNCH="1")
+            result = subprocess.run(["bash", str(installer)], cwd=root, env=environment,
+                                    capture_output=True, text=True, timeout=600)
+            if result.returncode:
+                raise RuntimeError(result.stderr.strip() or "The installer failed")
+        except Exception as exc:
+            GLib.idle_add(self._updates_failed, f"Update failed: {exc}")
+            return
+        GLib.idle_add(self._updates_installed, str(manifest["version"]))
+
+    def _updates_installed(self, version):
+        self.update_button.set_sensitive(True)
+        self.update_row.set_subtitle(f"Version {version} installed — restart to use it")
+        dialog = Adw.MessageDialog(transient_for=self.win,
+            heading=f"Ky Settings {version} installed",
+            body="Restart Ky Settings to use the new version.")
+        dialog.add_response("later", "Later")
+        dialog.add_response("restart", "Restart Now")
+        dialog.set_response_appearance("restart", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", self._on_restart_response)
+        dialog.present()
+
+    def _on_restart_response(self, _dialog, response):
+        if response == "restart":
+            Gio.Subprocess.new(["setsid", "kysettings"], Gio.SubprocessFlags.NONE)
+            self.quit()
+
+    def on_refresh_browsers(self, _button):
+        if not self._chrome_agent_enabled():
+            return
+        self.refresh_button.set_sensitive(False)
+        self.refresh_row.set_subtitle("Refreshing browsers — tabs and windows will restore…")
+        try:
+            process = Gio.Subprocess.new(
+                [str(self.CHROME_AGENT_SCRIPT), "refresh"],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+            self.hold()
+            process.communicate_utf8_async(None, None, self._refresh_browsers_done)
+        except GLib.Error as exc:
+            self.refresh_row.set_subtitle(str(exc))
+
+    def _refresh_browsers_done(self, process, result):
+        try:
+            _, stdout, stderr = process.communicate_utf8_finish(result)
+            self.refresh_row.set_subtitle(self.REFRESH_BROWSERS_SUBTITLE)
+            self._refresh_chrome_agent()
+            if not process.get_successful():
+                dialog = Adw.MessageDialog(transient_for=self.win,
+                    heading="Browser Refresh Failed",
+                    body=stderr.strip() or stdout.strip() or "The refresh did not complete.")
+                dialog.add_response("ok", "OK")
+                dialog.present()
+        finally:
+            self.release()
+
+    COPY_PATH_SUBTITLE = ("Add Copy Path to Files right-click menus for "
+                          "pictures, files, and folders")
+
+    def _is_copy_path_installed(self):
+        return COPY_PATH_EXTENSION.exists()
+
+    def _refresh_copy_path(self):
+        row = self.copy_path_row
+        row.handler_block(self._copy_path_handler)
+        try:
+            row.set_active(COPY_PATH_FLAG.exists())
+        finally:
+            row.handler_unblock(self._copy_path_handler)
+        if self._is_copy_path_installed():
+            row.set_sensitive(True)
+            row.set_subtitle(self.COPY_PATH_SUBTITLE)
+        else:
+            row.set_sensitive(False)
+            row.set_subtitle("Not installed — run ./install.sh from the kysettings repo")
+
+    def on_copy_path_toggle(self, row, _pspec):
+        if self._initializing:
+            return
+        try:
+            if row.get_active():
+                COPY_PATH_FLAG.parent.mkdir(parents=True, exist_ok=True)
+                COPY_PATH_FLAG.touch()
+            else:
+                COPY_PATH_FLAG.unlink(missing_ok=True)
+        except OSError as exc:
+            row.set_active(not row.get_active())
+            row.set_subtitle(f"Could not change Copy Path: {exc}")
+            return
+        row.set_subtitle(self.COPY_PATH_SUBTITLE)
 
     def add_display_page(self):
         page = Adw.PreferencesPage()
         page.set_title("Display")
 
+        # Updates group — first thing on the first page: version + update check.
+        updates_group = Adw.PreferencesGroup()
+        updates_group.set_title("Updates")
+
+        update_row = Adw.ActionRow()
+        update_row.set_title("Ky Settings")
+        self.update_row = update_row
+        self.update_button = Gtk.Button(label="Check for Updates", valign=Gtk.Align.CENTER)
+        self.update_button.connect("clicked", self.on_check_updates)
+        update_row.add_suffix(self.update_button)
+        updates_group.add(update_row)
+        self._refresh_update_row()
+        page.add(updates_group)
+
         # Desktop Settings group
         desktop_group = Adw.PreferencesGroup()
         desktop_group.set_title("Desktop")
-        desktop_group.set_description("Theme, wallpaper, fonts, and dock")
+        desktop_group.set_description("Your complete desktop preset and individual overrides")
 
         desktop_row = Adw.SwitchRow()
         desktop_row.set_title("Kyle's Desktop")
-        desktop_row.set_subtitle("OFF restores your exact previous desktop")
-        desktop_row.set_active(self._detect_kyle_desktop())
-        desktop_row.connect("notify::active", self.on_desktop_toggle)
+        desktop_row.set_subtitle("Apply the full preset; OFF restores your saved previous setup")
+        self.desktop_row = desktop_row
+        self._desktop_handler = desktop_row.connect("notify::active", self.on_desktop_toggle)
         desktop_group.add(desktop_row)
+        self.desktop_status_row = Adw.ActionRow(title="Preset: Checking…")
+        self.desktop_status_row.set_subtitle("Checking the actual settings")
+        self.desktop_reapply = Gtk.Button(label="Reapply", valign=Gtk.Align.CENTER)
+        self.desktop_reapply.connect("clicked", lambda *_: self._start_desktop_change("apply"))
+        self.desktop_status_row.add_suffix(self.desktop_reapply)
+        desktop_group.add(self.desktop_status_row)
+
+        terminal_row = Adw.SwitchRow(title="Use LXTerminal as Default")
+        self.terminal_row = terminal_row
+        self._terminal_handler = terminal_row.connect(
+            "notify::active", self.on_terminal_toggle)
+        desktop_group.add(terminal_row)
+        self._refresh_terminal()
 
         hide_bar_row = Adw.SwitchRow()
         hide_bar_row.set_title("Hide Top Bar")
@@ -685,6 +973,56 @@ class KySettings(Adw.Application):
         desktop_group.add(logout_row)
 
         page.add(desktop_group)
+
+        workspace_group = Adw.PreferencesGroup()
+        workspace_group.set_title("Workspaces")
+        workspace_group.set_description(
+            "Choose which monitor Ctrl+Alt+Left/Right controls."
+        )
+        workspace_row = Adw.ActionRow()
+        workspace_row.set_title("Workspace Monitor")
+        workspace_row.set_subtitle(
+            "Open the monitor menu. Your primary display, panel, and dock stay in place."
+        )
+        workspace_btn = Gtk.Button(label="Choose Monitor")
+        workspace_btn.set_valign(Gtk.Align.CENTER)
+        workspace_btn.connect("clicked", self.on_workspace_monitor)
+        workspace_row.add_suffix(workspace_btn)
+        workspace_row.set_activatable_widget(workspace_btn)
+        all_row = Adw.ActionRow()
+        all_row.set_title("All Displays Together")
+        all_row.set_subtitle("Ctrl+Alt+Left/Right switches workspaces on every display.")
+        all_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        all_row.add_suffix(all_switch)
+        all_row.set_activatable_widget(all_switch)
+        workspace_group.add(all_row)
+        workspace_group.add(workspace_row)
+        cycle_row = Adw.ActionRow()
+        cycle_row.set_title("Cycle Monitors with Keyboard")
+        cycle_row.set_subtitle("Ctrl+Alt+Up/Down chooses the display. Left/Right switches its workspace.")
+        cycle_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        cycle_row.add_suffix(cycle_switch)
+        cycle_row.set_activatable_widget(cycle_switch)
+        try:
+            schema_dir = pathlib.Path.home() / ".local/share/gnome-shell/extensions/workspace-monitor-mvp@ky.local/schemas"
+            source = Gio.SettingsSchemaSource.new_from_directory(str(schema_dir), Gio.SettingsSchemaSource.get_default(), False)
+            schema = source.lookup("org.gnome.shell.extensions.workspace-monitor", False)
+            if schema is None:
+                raise RuntimeError("Workspace Monitor update is not installed")
+            self._workspace_cycle_settings = Gio.Settings.new_full(schema, None, None)
+            self._workspace_cycle_settings.bind("cycle-monitors", cycle_switch, "active", Gio.SettingsBindFlags.DEFAULT)
+            if not schema.has_key("all-displays"):
+                raise RuntimeError("Workspace Monitor mode update is not installed")
+            self._workspace_cycle_settings.bind("all-displays", all_switch, "active", Gio.SettingsBindFlags.DEFAULT)
+            for control in [workspace_row, cycle_row]:
+                self._workspace_cycle_settings.bind("all-displays", control, "sensitive",
+                    Gio.SettingsBindFlags.GET | Gio.SettingsBindFlags.INVERT_BOOLEAN | Gio.SettingsBindFlags.NO_SENSITIVITY)
+        except (GLib.Error, RuntimeError):
+            all_row.set_sensitive(False)
+            cycle_row.set_sensitive(False)
+            cycle_row.set_subtitle("Install the Workspace Monitor update to enable this shortcut.")
+        workspace_group.add(cycle_row)
+        page.add(workspace_group)
 
         # Screen Off group
         group = Adw.PreferencesGroup()
@@ -813,6 +1151,18 @@ class KySettings(Adw.Application):
 
         page.add(dock_group)
 
+        files_group = Adw.PreferencesGroup()
+        files_group.set_title("Files")
+
+        copy_path_row = Adw.SwitchRow(title="Copy Path on Right-Click")
+        self.copy_path_row = copy_path_row
+        self._copy_path_handler = copy_path_row.connect(
+            "notify::active", self.on_copy_path_toggle)
+        files_group.add(copy_path_row)
+        self._refresh_copy_path()
+
+        page.add(files_group)
+
         self.stack.add_titled(page, "display", "Display")
 
     def is_pinned_to_dash(self):
@@ -843,298 +1193,141 @@ class KySettings(Adw.Application):
         except Exception as e:
             print(f"Error toggling pin: {e}")
 
-    @staticmethod
-    def _safe_settings(schema_id):
-        """Gio.Settings for schema_id, or None when it is not installed.
+    def _desktop_command(self, action, callback):
+        process = Gio.Subprocess.new(
+            ["/usr/bin/python3", str(pathlib.Path(ky_desktop.__file__).resolve()), action],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+        self.hold()
+        process.communicate_utf8_async(None, None, callback)
 
-        Gio.Settings.new() on an unknown schema is a GLib *fatal error*: it
-        aborts the process outright and no Python try/except can catch it. Any
-        schema that is not part of stock GNOME therefore has to be looked up
-        first. dash-to-dock is the one that bites — it ships with Ubuntu's
-        session but is absent on a plain GNOME install."""
-        source = Gio.SettingsSchemaSource.get_default()
-        if source is None or source.lookup(schema_id, True) is None:
-            return None
-        return Gio.Settings.new(schema_id)
-
-    def _wallpaper_uri(self):
-        """URI of the installed Kyle's Desktop wallpaper, if present."""
-        candidates = [
-            os.path.join(GLib.get_user_data_dir(), "backgrounds", self.WALLPAPER_NAME),
-            # Compatibility with installs made before the wallpaper was bundled.
-            os.path.join(GLib.get_home_dir(), "Pictures", "Wallpapers", self.WALLPAPER_NAME),
-        ]
-        for path in candidates:
-            if os.path.isfile(path):
-                return GLib.filename_to_uri(path, None)
-        return None
-
-    def _detect_kyle_desktop(self):
-        """Check if current desktop matches Kyle's settings (by gtk-theme)."""
-        s = self._safe_settings("org.gnome.desktop.interface")
-        if s is None:
-            return False
-        try:
-            return s.get_string("gtk-theme") == "Yaru-sage-dark"
-        except Exception:
-            return False
-
-    def _desktop_setting_keys(self):
-        """Every setting Kyle's Desktop may change."""
-        keys = [(schema, key) for schema, key, _value in self.DESKTOP_SETTINGS]
-        keys += [
-            ("org.gnome.desktop.background", "picture-uri"),
-            ("org.gnome.desktop.background", "picture-uri-dark"),
-            ("org.gnome.desktop.background", "picture-options"),
-        ]
-        return keys
-
-    def _capture_desktop_snapshot(self):
-        """Persist exact pre-Kyle user values before changing anything.
-
-        `get_user_value()` matters here: a key inherited from a vendor default
-        must be restored with reset(), while an explicit user value must be put
-        back as that exact typed GVariant.
-        """
-        if DESKTOP_SNAPSHOT.exists():
-            try:
-                existing = json.loads(DESKTOP_SNAPSHOT.read_text())
-                if existing.get("version") != 1 or not isinstance(
-                        existing.get("settings"), list):
-                    raise ValueError("unsupported or incomplete snapshot")
-                return True, [], []
-            except Exception as e:
-                return False, [], [f"Existing desktop snapshot is invalid: {e}"]
-
-        settings_data = []
-        skipped = []
-        errors = []
-        for schema_id, key in self._desktop_setting_keys():
-            s = self._safe_settings(schema_id)
-            if s is None:
-                skipped.append(f"{schema_id} — not installed")
-                continue
-            if not s.get_property("settings-schema").has_key(key):
-                skipped.append(f"{schema_id} {key} — no such key")
-                continue
-            try:
-                value = s.get_user_value(key)
-                item = {"schema": schema_id, "key": key, "user_set": value is not None}
-                if value is not None:
-                    item["type"] = value.get_type_string()
-                    item["value"] = value.unpack()
-                settings_data.append(item)
-            except Exception as e:
-                errors.append(f"{schema_id} {key}: {e}")
-
-        if errors:
-            return False, skipped, errors
-
-        snapshot = {
-            "version": 1,
-            "settings": settings_data,
-            "dash_minimize_enabled": self._is_dash_minimize_enabled(),
-        }
-        try:
-            DESKTOP_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
-            temporary = DESKTOP_SNAPSHOT.with_suffix(".tmp")
-            temporary.write_text(json.dumps(snapshot, indent=2) + "\n")
-            temporary.chmod(0o600)
-            os.replace(temporary, DESKTOP_SNAPSHOT)
-        except Exception as e:
-            return False, skipped, [f"Could not save desktop snapshot: {e}"]
-        return True, skipped, []
-
-    def _restore_desktop_snapshot(self):
-        """Restore the exact pre-Kyle state. Never invent fallback values."""
-        if not DESKTOP_SNAPSHOT.exists():
-            return None, 0, [], ["No pre-Kyle desktop snapshot exists"]
-        try:
-            snapshot = json.loads(DESKTOP_SNAPSHOT.read_text())
-            if snapshot.get("version") != 1:
-                raise ValueError("unsupported snapshot version")
-        except Exception as e:
-            return None, 0, [], [f"Could not read desktop snapshot: {e}"]
-
-        restored = 0
-        skipped = []
-        errors = []
-        for item in snapshot.get("settings", []):
-            schema_id = item.get("schema", "")
-            key = item.get("key", "")
-            s = self._safe_settings(schema_id)
-            if s is None:
-                skipped.append(f"{schema_id} — not installed")
-                continue
-            if not s.get_property("settings-schema").has_key(key):
-                skipped.append(f"{schema_id} {key} — no such key")
-                continue
-            try:
-                if item.get("user_set"):
-                    s.set_value(key, GLib.Variant(item["type"], item["value"]))
-                else:
-                    s.reset(key)
-                restored += 1
-            except Exception as e:
-                errors.append(f"{schema_id} {key}: {e}")
-
-        previous_minimize = bool(snapshot.get("dash_minimize_enabled", False))
-        if self._set_extension_enabled(self.DASH_MINIMIZE_UUID, previous_minimize):
-            restored += 1
-        else:
-            errors.append("Could not restore the Dock Minimize extension")
-
-        if not errors and not skipped:
-            try:
-                DESKTOP_SNAPSHOT.unlink()
-            except Exception as e:
-                errors.append(f"Could not retire restored snapshot: {e}")
-        return previous_minimize, restored, skipped, errors
-
-    def _set_desktop_row_without_notify(self, row, active):
-        """Correct a rejected toggle without recursively handling it."""
-        initializing = self._initializing
-        self._initializing = True
-        try:
-            row.set_active(active)
-        finally:
-            self._initializing = initializing
-
-    def on_desktop_toggle(self, row, _pspec):
-        """Apply Kyle's preset or restore the exact captured desktop state."""
-        if self._initializing:
+    def _refresh_desktop_status(self, *_):
+        if not hasattr(self, "desktop_row") or getattr(self, "_desktop_busy", False):
             return
-        use_kyle = row.get_active()
+        if getattr(self, "_desktop_status_running", False):
+            self._desktop_refresh_again = True
+            return
+        self._desktop_status_running = True
+        try:
+            self._desktop_command("status", self._desktop_status_done)
+        except GLib.Error as exc:
+            self._desktop_status_running = False
+            self.desktop_status_row.set_subtitle(str(exc))
 
-        if not use_kyle:
-            previous_minimize, restored, skipped, errors = self._restore_desktop_snapshot()
-            if previous_minimize is None:
-                # This covers machines already using Kyle's settings before the
-                # snapshot feature existed. Changing nothing is the only safe
-                # behavior when there is no trustworthy state to restore.
-                self._set_desktop_row_without_notify(row, True)
-                body = ("Nothing was changed. KySettings has no snapshot from before "
-                        "Kyle's Desktop was enabled on this machine, so it will not "
-                        "guess or reset your settings.")
-                heading = "No Previous State Saved"
+    def _desktop_status_done(self, process, result):
+        try:
+            _, stdout, stderr = process.communicate_utf8_finish(result)
+            if not process.get_successful():
+                raise RuntimeError(stderr.strip() or "Could not read preset status")
+            data = json.loads(stdout)
+            if getattr(self, "_desktop_busy", False):
+                return
+            self.desktop_row.handler_block(self._desktop_handler)
+            try:
+                self.desktop_row.set_active(data["managed"])
+            finally:
+                self.desktop_row.handler_unblock(self._desktop_handler)
+            self.desktop_status_row.set_title("Preset: " + data["status"])
+            details = data["errors"] + data["unavailable"] + data["pending"] + data["differences"]
+            if details:
+                text = "; ".join(ky_desktop.describe(x) for x in details[:3])
+                if len(details) > 3:
+                    text += f"; and {len(details) - 3} more"
+            elif data["managed"]:
+                text = "All preset settings match. OFF restores the state saved before applying."
             else:
-                if self.dash_minimize_row.get_active() != previous_minimize:
-                    self.dash_minimize_row.set_active(previous_minimize)
-                pending = (previous_minimize and
-                           not self._is_dash_minimize_loaded())
-                self.dash_minimize_row.set_subtitle(
-                    "Log out and back in to load the extension"
-                    if pending else self.DASH_MINIMIZE_SUBTITLE)
-                self.dash_minimize_pending_row.set_visible(pending)
-                parts = [f"Your previous desktop was restored ({restored} settings)."]
-                if skipped:
-                    parts.append(f"{len(skipped)} unavailable settings skipped; "
-                                 "the snapshot was kept for retry:\n" +
-                                 "\n".join(skipped[:5]))
-                if errors:
-                    parts.append(f"{len(errors)} failed; the snapshot was kept for retry:\n" +
-                                 "\n".join(errors[:5]))
-                body = "\n\n".join(parts)
-                heading = "Previous Desktop Restored"
+                text = "Enable to apply the full preset and save your current setup."
+            self.desktop_status_row.set_subtitle(text)
+            self.desktop_reapply.set_label("Reapply" if data["managed"] else "Apply")
+        except Exception as exc:
+            self.desktop_status_row.set_title("Preset: Status unavailable")
+            self.desktop_status_row.set_subtitle(str(exc))
+        finally:
+            self._desktop_status_running = False
+            self.release()
+            if getattr(self, "_desktop_refresh_again", False):
+                self._desktop_refresh_again = False
+                self._refresh_desktop_status()
 
-            dialog = Adw.MessageDialog(transient_for=self.win,
-                                       heading=heading, body=body)
-            dialog.add_response("ok", "OK")
-            dialog.present()
+    def _queue_desktop_refresh(self, *_):
+        if self._initializing or getattr(self, "_desktop_busy", False):
             return
+        if getattr(self, "_desktop_refresh_source", 0):
+            GLib.source_remove(self._desktop_refresh_source)
+        def refresh():
+            self._desktop_refresh_source = 0
+            self._refresh_desktop_status()
+            return False
+        self._desktop_refresh_source = GLib.timeout_add(300, refresh)
 
-        captured, capture_skipped, capture_errors = self._capture_desktop_snapshot()
-        if not captured:
-            self._set_desktop_row_without_notify(row, False)
-            dialog = Adw.MessageDialog(
-                transient_for=self.win,
-                heading="Desktop Unchanged",
-                body=("Kyle's Desktop was not applied because your current settings "
-                      "could not be saved safely.\n\n" +
-                      "\n".join(capture_errors[:5])),
-            )
-            dialog.add_response("ok", "OK")
-            dialog.present()
+    def _wire_desktop_refresh(self):
+        def visit(widget):
+            if widget not in (self.desktop_row,):
+                if isinstance(widget, (Adw.SwitchRow, Gtk.Switch)):
+                    widget.connect("notify::active", self._queue_desktop_refresh)
+                elif isinstance(widget, Adw.ComboRow):
+                    widget.connect("notify::selected", self._queue_desktop_refresh)
+                elif isinstance(widget, Gtk.Scale):
+                    widget.connect("value-changed", self._queue_desktop_refresh)
+            child = widget.get_first_child()
+            while child:
+                visit(child)
+                child = child.get_next_sibling()
+        visit(self.stack)
+
+    def on_desktop_toggle(self, row, _):
+        if not self._initializing:
+            self._start_desktop_change("apply" if row.get_active() else "restore")
+
+    def _start_desktop_change(self, action):
+        if getattr(self, "_desktop_busy", False):
             return
+        self._desktop_busy = True
+        self.stack.set_sensitive(False)
+        self.desktop_status_row.set_title("Applying preset…" if action == "apply" else "Restoring previous setup…")
+        self.desktop_status_row.set_subtitle("Administrator authentication may be requested for system settings.")
+        try:
+            self._desktop_command(action, self._desktop_change_done)
+        except GLib.Error as exc:
+            self._desktop_busy = False
+            self.stack.set_sensitive(True)
+            self.desktop_status_row.set_subtitle(str(exc))
 
-        entries = list(self.DESKTOP_SETTINGS)
-        wallpaper = self._wallpaper_uri()
-        if wallpaper:
-            entries += [
-                ("org.gnome.desktop.background", "picture-uri", wallpaper),
-                ("org.gnome.desktop.background", "picture-uri-dark", wallpaper),
-                ("org.gnome.desktop.background", "picture-options", "zoom"),
-            ]
-
-        applied = 0
-        skipped = []
-        errors = []
-        for entry in entries:
-            schema_id, key, value = entry
-
-            s = self._safe_settings(schema_id)
-            if s is None:
-                skipped.append(f"{schema_id} — not installed")
-                continue
-            # Setting a key the schema doesn't define is fatal the same way an
-            # unknown schema is, so this has to be checked too — an extension
-            # can be installed but too old to have the key.
-            if not s.get_property("settings-schema").has_key(key):
-                skipped.append(f"{schema_id} {key} — no such key")
-                continue
-            try:
-                if isinstance(value, bool):  # before int: bool subclasses int
-                    s.set_boolean(key, value)
-                elif isinstance(value, int):
-                    s.set_int(key, value)
-                else:
-                    s.set_string(key, value)
-                applied += 1
-            except Exception as e:
-                errors.append(f"{schema_id} {key}: {e}")
-
-        # The extension is installed with KySettings. Write GNOME Shell's
-        # enabled list directly so this also works before the running shell has
-        # discovered a brand-new extension; it will load at the next login.
-        minimize_pending = False
-        if not self._is_extension_installed(self.DASH_MINIMIZE_UUID):
-            if use_kyle:
-                errors.append("Dock Minimize extension is not installed")
-        elif self._set_extension_enabled(self.DASH_MINIMIZE_UUID, use_kyle):
-            applied += 1
-            minimize_pending = use_kyle and not self._is_dash_minimize_loaded()
-            # Keep the dedicated override row in sync without changing the
-            # meaning of its handler when a user operates it directly.
-            if self.dash_minimize_row.get_active() != use_kyle:
-                self.dash_minimize_row.set_active(use_kyle)
-            self.dash_minimize_row.set_subtitle(
-                "Log out and back in to load the extension"
-                if minimize_pending else self.DASH_MINIMIZE_SUBTITLE)
-            self.dash_minimize_pending_row.set_visible(minimize_pending)
-        else:
-            errors.append("Could not update the Dock Minimize extension")
-
-        parts = [f"Kyle's settings applied ({applied} settings).",
-                 "Your previous desktop was saved and will be restored by OFF."]
-        if wallpaper is None:
-            parts.append(f"Wallpaper unchanged — bundled {self.WALLPAPER_NAME} "
-                         "is missing; reinstall KySettings.")
-        if minimize_pending:
-            parts.append("Dock Minimize will load after you log out and back in.")
-        skipped = capture_skipped + skipped
-        if skipped:
-            parts.append(f"{len(skipped)} skipped:\n" + "\n".join(skipped[:5]))
-        if errors:
-            parts.append(f"{len(errors)} failed:\n" + "\n".join(errors[:5]))
-        body = "\n\n".join(parts)
-
-        dialog = Adw.MessageDialog(
-            transient_for=self.win,
-            heading="Desktop Updated",
-            body=body,
-        )
-        dialog.add_response("ok", "OK")
-        dialog.present()
+    def _desktop_change_done(self, process, result):
+        try:
+            _, stdout, stderr = process.communicate_utf8_finish(result)
+            data = json.loads(stdout) if stdout.strip() else {}
+            errors = data.get("errors", [])
+            if not process.get_successful() and not errors:
+                errors = [stderr.strip() or "The change could not be completed."]
+            # Rebuild controls from the actual settings without firing their handlers.
+            self._initializing = True
+            visible = self.stack.get_visible_child_name()
+            pages = self.stack.get_pages()
+            children = [pages.get_item(i).get_child() for i in range(pages.get_n_items())]
+            timers = self.stack.get_child_by_name("timers")
+            for child in children:
+                self.stack.remove(child)
+            for build in [self.add_display_page, self.add_effects_page, self.add_wireless_page,
+                          self.add_keyboard_page]:
+                build()
+            self.stack.add_titled(timers, "timers", "Timers")
+            self.add_privacy_page()
+            self.stack.set_visible_child_name(visible)
+            self._wire_desktop_refresh()
+            if errors:
+                dialog = Adw.MessageDialog(transient_for=self.win,
+                    heading="Preset Needs Attention", body="\n".join(errors) +
+                    "\n\nYour saved previous state has been kept. Use Reapply to retry, or turn the preset off to restore it.")
+                dialog.add_response("ok", "OK")
+                dialog.present()
+        except Exception as exc:
+            self.desktop_status_row.set_subtitle(str(exc))
+        finally:
+            self._initializing = False
+            self._desktop_busy = False
+            self.stack.set_sensitive(True)
+            self.release()
+            self._refresh_desktop_status()
 
     HIDE_TOP_BAR_UUID = "hidetopbar@mathieu.bidon.ca"
 
@@ -1252,25 +1445,11 @@ class KySettings(Adw.Application):
 
     @staticmethod
     def _set_extension_enabled(uuid, enable):
-        """Write the key the shell reads rather than calling `gnome-extensions
-        enable`, which refuses extensions the running shell has not scanned yet.
-        The shell applies this live when loaded, and at the next login when not."""
         try:
-            settings = Gio.Settings.new("org.gnome.shell")
-            enabled = settings.get_strv("enabled-extensions")
-            if enable and uuid not in enabled:
-                enabled.append(uuid)
-            elif not enable and uuid in enabled:
-                enabled.remove(uuid)
-            settings.set_strv("enabled-extensions", enabled)
-
-            disabled = settings.get_strv("disabled-extensions")
-            if enable and uuid in disabled:
-                disabled.remove(uuid)
-                settings.set_strv("disabled-extensions", disabled)
+            ky_desktop.extension_set(uuid, enable)
             return True
-        except Exception as e:
-            print(f"Failed to toggle extension {uuid}: {e}")
+        except Exception as exc:
+            print(f"Could not change extension {uuid}: {exc}")
             return False
 
     def _is_dash_minimize_enabled(self):
@@ -1444,25 +1623,17 @@ class KySettings(Adw.Application):
             row.set_subtitle(self.WAYLAND_FOCUS_SUBTITLE)
 
     def on_game_mute_toggle(self, row, _):
-        """Start or stop the game auto-mute script."""
         if self._initializing:
             return
-
-        if row.get_active():
-            # The old Minecraft-only daemon would fight this one over the same
-            # streams, so retire it if it is still running.
-            subprocess.run(["pkill", "-f", "minecraft-auto-mute"], capture_output=True)
-            self.set_game_mute_autostart(True)
-            # The daemon takes its own lock, so a double-start is harmless.
-            subprocess.Popen(
-                [GAME_MUTE_SCRIPT],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
-            )
-        else:
-            self.set_game_mute_autostart(False)
-            self.stop_game_mute()
+        try:
+            if row.get_active():
+                ky_desktop.game_mute_feature().apply()
+            else:
+                self.set_game_mute_autostart(False)
+                ky_desktop.mute_set(False)
+        except Exception as exc:
+            row.set_subtitle(str(exc))
+        self._queue_desktop_refresh()
 
 
     # =========================================================================
@@ -1483,7 +1654,8 @@ class KySettings(Adw.Application):
         bms_row = Adw.ActionRow()
         bms_row.set_title("Extension Status")
         if bms_installed:
-            bms_row.set_subtitle("Installed and active")
+            bms_row.set_subtitle("Installed and active" if self._is_extension_enabled("blur-my-shell@aunetx")
+                                 else "Installed; extension is disabled")
             ok_icon = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
             ok_icon.add_css_class("success")
             ok_icon.set_valign(Gtk.Align.CENTER)
@@ -1584,10 +1756,10 @@ class KySettings(Adw.Application):
     def _bms_schema(self, sub):
         """Return a Settings object for a BMS sub-schema, or None if not installed."""
         schema_id = f"org.gnome.shell.extensions.blur-my-shell.{sub}"
-        source = Gio.SettingsSchemaSource.get_default()
-        if source and source.lookup(schema_id, True):
-            return Gio.Settings.new(schema_id)
-        return None
+        try:
+            return ky_desktop.settings(schema_id)
+        except RuntimeError:
+            return None
 
     def _bms_get_bool(self, sub, key):
         s = self._bms_schema(sub)
@@ -1600,7 +1772,9 @@ class KySettings(Adw.Application):
     def _bms_set_bool(self, sub, key, value):
         s = self._bms_schema(sub)
         if s:
-            s.set_boolean(key, value)
+            ky_desktop.put(f"org.gnome.shell.extensions.blur-my-shell.{sub}", key, value)
+            if value:
+                ky_desktop.extension_set("blur-my-shell@aunetx", True)
 
     def _bms_set_int(self, sub, key, value):
         s = self._bms_schema(sub)
@@ -1985,6 +2159,18 @@ class KySettings(Adw.Application):
         except Exception:
             pass
 
+    def on_workspace_monitor(self, button):
+        try:
+            subprocess.Popen([os.path.expanduser("~/.local/bin/workspace-monitor")])
+        except OSError as error:
+            dialog = Adw.MessageDialog(
+                transient_for=self.win,
+                heading="Could Not Open Workspace Monitor",
+                body=str(error),
+            )
+            dialog.add_response("close", "Close")
+            dialog.present()
+
     def on_blank_changed(self, row, _):
         if self._initializing:
             return
@@ -2019,6 +2205,16 @@ class KySettings(Adw.Application):
         page = Adw.PreferencesPage()
         page.set_title("Keyboard")
 
+        super_group = Adw.PreferencesGroup(title="Super Key")
+        super_row = Adw.SwitchRow(title="Keychron Super Key")
+        self.keychron_super_row = super_row
+        self._keychron_super_handler = None
+        self._refresh_keychron_super()
+        self._keychron_super_handler = super_row.connect(
+            "notify::active", self.on_keychron_super_toggle)
+        super_group.add(super_row)
+        page.add(super_group)
+
         # Shortcuts group
         group = Adw.PreferencesGroup()
         group.set_title("Custom Shortcuts")
@@ -2042,16 +2238,6 @@ class KySettings(Adw.Application):
             "Ctrl + Shift + S or Super + Shift + S opens screenshot selection")
         screenshot_settings = Gio.Settings.new("org.gnome.shell.keybindings")
         bindings = list(screenshot_settings.get_strv("show-screenshot-ui"))
-        # Normalize older spellings and ensure both supported shortcuts exist.
-        if "<Control><Shift>s" in bindings:
-            bindings.remove("<Control><Shift>s")
-        changed = False
-        for binding in SCREENSHOT_BINDINGS:
-            if binding not in bindings:
-                bindings.append(binding)
-                changed = True
-        if changed:
-            screenshot_settings.set_strv("show-screenshot-ui", bindings)
         ss_row.set_active(all(binding in bindings
                               for binding in SCREENSHOT_BINDINGS))
         ss_row.connect("notify::active", self.on_screenshot_toggle)
@@ -2105,6 +2291,71 @@ class KySettings(Adw.Application):
         page.add(stt_group)
 
         self.stack.add_titled(page, "keyboard", "Keyboard")
+
+    def _keychron_super_helper(self):
+        local = pathlib.Path(__file__).resolve().parent / "scripts" / "keychron-super"
+        return str(local if local.exists() else
+                   pathlib.Path.home() / ".local/bin/keychron-super")
+
+    def _refresh_keychron_super(self):
+        row = self.keychron_super_row
+        try:
+            result = subprocess.run(
+                ["/usr/bin/python3", self._keychron_super_helper(), "status"],
+                capture_output=True, text=True, timeout=5)
+            if result.returncode:
+                raise RuntimeError(result.stderr.strip())
+            handler = getattr(self, "_keychron_super_handler", None)
+            if handler:
+                row.handler_block(handler)
+            try:
+                row.set_active(result.stdout.strip() == "enabled")
+            finally:
+                if handler:
+                    row.handler_unblock(handler)
+            row.set_sensitive(True)
+            row.set_subtitle("Match the mouse’s right Super key on your Keychron K4. "
+                             "Changes apply immediately and require administrator authentication.")
+        except Exception as exc:
+            row.set_sensitive(False)
+            row.set_subtitle(f"Could not read the Super key setting: {exc}")
+
+    def on_keychron_super_toggle(self, row, _):
+        if self._initializing:
+            return
+        row.set_sensitive(False)
+        row.set_subtitle("Waiting for administrator authentication…")
+        try:
+            process = Gio.Subprocess.new(
+                ["pkexec", "/usr/bin/python3", self._keychron_super_helper(),
+                 "enable" if row.get_active() else "disable"],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+        except GLib.Error as exc:
+            self._refresh_keychron_super()
+            self._keychron_super_error(str(exc))
+            return
+        self.hold()
+        process.communicate_utf8_async(None, None, self._keychron_super_done)
+
+    def _keychron_super_done(self, process, result):
+        try:
+            _, stdout, stderr = process.communicate_utf8_finish(result)
+            self._refresh_keychron_super()
+            self._refresh_desktop_status()
+            if not process.get_successful():
+                self._keychron_super_error(
+                    stderr.strip() or "The change was cancelled or could not be applied.")
+        except GLib.Error as exc:
+            self._refresh_keychron_super()
+            self._keychron_super_error(str(exc))
+        finally:
+            self.release()
+
+    def _keychron_super_error(self, message):
+        dialog = Adw.MessageDialog(transient_for=self.win,
+                                  heading="Super Key Change Failed", body=message)
+        dialog.add_response("ok", "OK")
+        dialog.present()
 
     def add_timers_page(self):
         page = Adw.PreferencesPage()
@@ -2410,12 +2661,10 @@ class KySettings(Adw.Application):
         settings.set_strv("custom-keybindings", new_paths)
 
     def on_date_toggle(self, row, _):
+        if self._initializing:
+            return
         if row.get_active():
-            self.add_keybinding(
-                "ky-insert-date",
-                "bash -c 'wl-copy \"$(date +\"%F %T\")\"'",
-                "<Control><Alt>period"
-            )
+            ky_desktop.date_feature().apply()
         else:
             self.remove_keybinding("ky-insert-date")
 
@@ -2512,7 +2761,7 @@ class KySettings(Adw.Application):
         """Launch speech-lock in a terminal window."""
         script = os.path.expanduser("~/.local/bin/speech-lock")
         subprocess.Popen(
-            ["gnome-terminal", "--title=Speech Lock", "--", "python3", script],
+            ["x-terminal-emulator", "-e", "python3", script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -2521,6 +2770,30 @@ class KySettings(Adw.Application):
         page = Adw.PreferencesPage()
         page.set_title("Privacy")
         page.set_icon_name("security-high-symbolic")
+
+        # Agent access group — a privacy boundary, not a display preference.
+        agent_group = Adw.PreferencesGroup()
+        agent_group.set_title("Agent")
+        agent_group.set_description("What the opencode assistant may reach on this machine")
+
+        chrome_agent_row = Adw.SwitchRow()
+        chrome_agent_row.set_title("Agent Chrome Access")
+        self.chrome_agent_row = chrome_agent_row
+        self._chrome_agent_handler = chrome_agent_row.connect(
+            "notify::active", self.on_chrome_agent_toggle)
+        agent_group.add(chrome_agent_row)
+
+        refresh_row = Adw.ActionRow()
+        refresh_row.set_title("Refresh All Browsers")
+        refresh_row.set_subtitle(self.REFRESH_BROWSERS_SUBTITLE)
+        self.refresh_row = refresh_row
+        self.refresh_button = Gtk.Button(label="Refresh", valign=Gtk.Align.CENTER)
+        self.refresh_button.connect("clicked", self.on_refresh_browsers)
+        refresh_row.add_suffix(self.refresh_button)
+        agent_group.add(refresh_row)
+
+        self._refresh_chrome_agent()
+        page.add(agent_group)
 
         # Cleanup group
         cleanup_group = Adw.PreferencesGroup()
@@ -2583,13 +2856,5 @@ if __name__ == "__main__":
         print(f"kysettings {__version__}")
         sys.exit(0)
     if "--restore-desktop" in sys.argv:
-        previous_minimize, restored, skipped, errors = (
-            KySettings()._restore_desktop_snapshot())
-        if previous_minimize is None:
-            print("No desktop snapshot was restored.", file=sys.stderr)
-            sys.exit(1)
-        print(f"Restored {restored} pre-Kyle desktop settings.")
-        for detail in skipped + errors:
-            print(detail, file=sys.stderr)
-        sys.exit(1 if skipped or errors else 0)
+        sys.exit(ky_desktop.main(["restore"]))
     KySettings().run(None)

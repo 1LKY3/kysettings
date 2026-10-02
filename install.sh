@@ -19,7 +19,7 @@ if m.group(1) != script:
 DRIFT
 
 # All dependencies — install everything upfront so nothing needs internet later
-ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks xdotool xclip wl-clipboard)
+ALL_DEPS=(python3 python3-gi gir1.2-adw-1 redsocks xdotool xclip wl-clipboard python3-nautilus)
 MISSING=()
 for pkg in "${ALL_DEPS[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then
@@ -42,10 +42,27 @@ mkdir -p ~/.local/share/applications
 mkdir -p ~/.local/share/backgrounds
 
 # Install main app
+cp ky_desktop.py ~/.local/bin/ky_desktop.py
+cp scripts/ky-desktop ~/.local/bin/ky-desktop
+chmod +x ~/.local/bin/ky-desktop
 cp kysettings.py ~/.local/bin/kysettings
 chmod +x ~/.local/bin/kysettings
 
+# Install terminal selection and its Files integration source.
+cp scripts/ky-terminal ~/.local/bin/ky-terminal
+chmod +x ~/.local/bin/ky-terminal
+mkdir -p ~/.local/share/kysettings
+cp nautilus/ky-terminal.py ~/.local/share/kysettings/ky-terminal-nautilus.py
+
+# Install the Copy Path Files extension. It stays inert until the Display
+# page toggle creates ~/.config/kysettings/copy-path.enabled, so the switch
+# works in already-open Files windows without a restart.
+mkdir -p ~/.local/share/nautilus-python/extensions
+cp nautilus/ky-copy-path.py ~/.local/share/nautilus-python/extensions/ky-copy-path.py
+
 # Install helper scripts
+cp scripts/workspace-monitor ~/.local/bin/workspace-monitor
+chmod +x ~/.local/bin/workspace-monitor
 cp scripts/pdanet-proxy ~/.local/bin/pdanet-proxy
 chmod +x ~/.local/bin/pdanet-proxy
 
@@ -65,6 +82,9 @@ chmod +x ~/.local/bin/speech-lock
 
 cp scripts/bt-reset ~/.local/bin/bt-reset
 chmod +x ~/.local/bin/bt-reset
+
+cp scripts/keychron-super ~/.local/bin/keychron-super
+chmod +x ~/.local/bin/keychron-super
 
 # Ensure ~/.local/bin is in PATH
 if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
@@ -101,5 +121,6 @@ cp backgrounds/voidflow-mountains.png \
 echo ""
 echo "Installed successfully!"
 
-# Launch the app (handles dash pinning on first run)
-kysettings &
+# Launch the app (handles dash pinning on first run). The in-app updater sets
+# KYSETTINGS_NO_LAUNCH and restart itself once installation succeeds.
+[ -n "${KYSETTINGS_NO_LAUNCH:-}" ] || kysettings &
