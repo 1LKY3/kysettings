@@ -21,7 +21,7 @@ import ky_desktop
 import ky_pc_page
 from datetime import datetime, timedelta
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 UPDATE_MANIFEST_URL = "https://kysettings.dustforge.com/latest.json"
 
 

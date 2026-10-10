@@ -44,9 +44,9 @@ sudo apt remove python3-gi gir1.2-adw-1 python3-nautilus redsocks
 
 ## Features
 
-**PC** (0.5.1, the first tab and the one Ky Settings opens on)
+**PC** (0.5.2, the first tab and the one Ky Settings opens on)
 - Two columns: everything about RAM on the left (effective RAM card, Tune, quick
-  actions, where memory is, memory history, zram, swap areas); CPU, GPU and network
+  actions, where memory is, memory history, zram, swap areas); GPU first, then CPU and network
   on the right. `KYSETTINGS_PAGE=pc KYSETTINGS_MAXIMIZED=1 kysettings` opens straight on it.
 - **Effective RAM is the headline:** one big number for everything the PC can
   hold (RAM, then compressed RAM, then SSD swap), free space right now, how many

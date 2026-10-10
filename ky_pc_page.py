@@ -217,7 +217,7 @@ class PCPage:
     def __init__(self, stack):
         self.stack = stack
         self.sampler = stats.Sampler()
-        # Two columns: everything about RAM on the left (the star), CPU and network on the right.
+        # Two columns: everything about RAM on the left (the star); GPU, then CPU and network on the right.
         self.page = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         clamp = Adw.Clamp(maximum_size=1500, tightening_threshold=1200)
         columns = Gtk.Box(spacing=28, homogeneous=True)
@@ -302,6 +302,8 @@ class PCPage:
         self.swap_rows = {}
 
         self.column = self.right
+        if self.sampler.gpu_dev:
+            self._build_gpu()
         g = self._group("CPU History")
         self.cpu_graph = Graph(height=230); g.add(self.cpu_graph)
         n = len(self.sampler.cpu) - 1
@@ -319,9 +321,6 @@ class PCPage:
         for key, title, sub in (("total", "Total", "All 16 threads together"), ("temp", "Temperature", "CPU package"),
                                 ("load", "Load average", "1, 5 and 15 minutes")):
             row, label = value_row(title, sub); self.cpu_rows[key] = label; g.add(row)
-
-        if self.sampler.gpu_dev:
-            self._build_gpu()
 
         g = self._group("Network History")
         self.net_graph = Graph(percent=False, fill_first=True); g.add(self.net_graph)
