@@ -21,7 +21,7 @@ import ky_desktop
 import ky_pc_page
 from datetime import datetime, timedelta
 
-__version__ = "0.4.9"
+__version__ = "0.5.0"
 UPDATE_MANIFEST_URL = "https://kysettings.dustforge.com/latest.json"
 
 
@@ -576,14 +576,14 @@ class KySettings(Adw.Application):
         self.stack = Adw.ViewStack()
         self.stack.add_css_class("mountain-content")
 
-        # Add pages
+        # Add pages; PC comes first so it is the leftmost tab and opens by default
+        self.add_pc_page()
         self.add_display_page()
         self.add_effects_page()
         self.add_wireless_page()
         self.add_keyboard_page()
         self.add_timers_page()
         self.add_privacy_page()
-        self.add_pc_page()
 
         self._initializing = False
 
@@ -1314,8 +1314,10 @@ class KySettings(Adw.Application):
             pages = self.stack.get_pages()
             children = [pages.get_item(i).get_child() for i in range(pages.get_n_items())]
             timers = self.stack.get_child_by_name("timers")
+            pc = self.stack.get_child_by_name("pc")
             for child in children:
                 self.stack.remove(child)
+            self.stack.add_titled(pc, "pc", "PC")
             for build in [self.add_display_page, self.add_effects_page, self.add_wireless_page,
                           self.add_keyboard_page]:
                 build()
