@@ -44,14 +44,23 @@ sudo apt remove python3-gi gir1.2-adw-1 python3-nautilus redsocks
 
 ## Features
 
-**PC** (0.4.7)
-- Live one-minute graphs in the style of Ubuntu's System Monitor: memory and
-  swap, all 16 CPU threads, network. Effective Memory shows everything the PC
-  can hold: RAM, then compressed RAM (zram), then swap on the SSD, with the
-  headline "X GB free of about Y GB" and one stacked bar. zram shows what it
-  stores, the real RAM it uses and the live compression ratio. Swap areas are
-  listed by priority. Read straight from /proc and /sys (`ky_stats.py`), drawn
-  by `ky_pc_page.py`; it samples once a second and draws only while the tab is open.
+**PC** (0.4.8)
+- **Effective RAM is the headline:** one big number for everything the PC can
+  hold (RAM, then compressed RAM, then SSD swap), free space right now, how many
+  times the physical RAM that works out to, and a speed-zone bar showing how full
+  each zone is.
+- **Tune:** swap eagerness (swappiness 10 to 180), compressed RAM size (zram, up to
+  1.5x RAM), compression (zstd, lz4, lzo-rle) and the SSD swap file size, with a live
+  "after applying" preview and Restore recommended (100, 16 GB zstd, 48 GB).
+  Changes go through `ky-memory` with one password prompt. As root it re-checks
+  everything: values in range, data moved out of zram or a swap file must fit in
+  free RAM plus other swap with a 2 GB margin, a swap file leaves 50 GB free on its
+  ext4 drive, and swap grows before anything shrinks. Original files are kept as
+  `.ky-orig`. If zram-tools is missing, an Install button offers it.
+- **Quick actions:** free up file cache, and move SSD swap back into RAM (only
+  offered when it fits with room to spare).
+- Live one-minute graphs in the style of Ubuntu's System Monitor for memory and
+  swap, all CPU threads and network; samples once a second, draws only while open.
 
 **Display**
 - Use LXTerminal as Default — switches Ubuntu's system terminal alternative,

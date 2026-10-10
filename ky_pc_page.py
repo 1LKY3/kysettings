@@ -6,9 +6,47 @@ import math
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw, GLib, Gio, Gdk
+import json
+import os
+import pathlib
 
 import ky_stats as stats
+
+PC_CSS = b"""
+.pc-hero { background-image: linear-gradient(135deg, rgba(90,102,121,0.55), rgba(37,45,59,0.95)); border-radius: 18px; }
+.pc-kicker { font-size: 12px; font-weight: 800; letter-spacing: 3px; color: #A7B5C8; }
+.pc-hero-value { font-size: 76px; font-weight: 900; letter-spacing: -2px; color: #FFFEFB; }
+"""
+_css_loaded = False
+
+
+def load_css():
+    global _css_loaded
+    if _css_loaded:
+        return
+    provider = Gtk.CssProvider(); provider.load_from_data(PC_CSS)
+    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+    _css_loaded = True
+
+
+def helper_path():
+    here = pathlib.Path(os.path.realpath(__file__)).parent
+    for candidate in (here / "scripts" / "ky-memory", here / "ky-memory"):
+        if candidate.exists():
+            return str(candidate)
+    return str(pathlib.Path.home() / ".local/bin/ky-memory")
+
+
+def eagerness_text(n):
+    if n <= 40:
+        return "Keeps programs in RAM and swaps only when RAM is nearly full"
+    if n <= 80:
+        return "Balanced: swaps idle memory once RAM gets busy"
+    if n <= 120:
+        return "Compresses idle memory early for the most free RAM (recommended with zram)"
+    return "Squeezes hard: the most free RAM, a bit more compression work"
+
 
 # Palette pulled from the KySettings mountain theme.
 GRID = (0.65, 0.71, 0.78, 0.16)
@@ -21,6 +59,7 @@ RX_C = (0.38, 0.62, 0.92)
 TX_C = (0.93, 0.47, 0.36)
 CACHE_C = (0.48, 0.55, 0.64)
 FREE_C = (0.30, 0.35, 0.44)
+FAST_C = (0.56, 0.66, 0.86)        # full-speed RAM zone
 DISK_C = (0.36, 0.80, 0.55)
 
 
@@ -113,6 +152,35 @@ class MemoryBar(Gtk.DrawingArea):
             x += width
 
 
+class ZoneBar(Gtk.DrawingArea):
+    """The effective-RAM ceiling as three speed zones, each filled as far as it is used."""
+
+    def __init__(self):
+        super().__init__()
+        self.set_content_height(30); self.set_hexpand(True)
+        self.zones = []          # (capacity, used, rgb)
+        self.set_draw_func(self._draw)
+
+    def set_zones(self, zones):
+        self.zones = zones; self.queue_draw()
+
+    def _draw(self, area, cr, w, h):
+        total = sum(c for c, _, _ in self.zones) or 1
+        r = 8
+        cr.new_sub_path()
+        cr.arc(r, r, r, math.pi, 1.5 * math.pi); cr.arc(w - r, r, r, 1.5 * math.pi, 0)
+        cr.arc(w - r, h - r, r, 0, 0.5 * math.pi); cr.arc(r, h - r, r, 0.5 * math.pi, math.pi)
+        cr.close_path(); cr.clip()
+        x = 0.0
+        for capacity, used, rgb in self.zones:
+            width = w * capacity / total
+            cr.set_source_rgba(*rgb, 0.22); cr.rectangle(x, 0, width, h); cr.fill()
+            fill = width * min(1.0, used / capacity) if capacity else 0
+            cr.set_source_rgb(*rgb); cr.rectangle(x, 0, fill, h); cr.fill()
+            cr.set_source_rgba(0.05, 0.07, 0.11, 0.9); cr.rectangle(x + width - 1, 0, 2, h); cr.fill()
+            x += width
+
+
 def swatch(rgb):
     area = Gtk.DrawingArea(); area.set_content_width(14); area.set_content_height(14)
     area.set_valign(Gtk.Align.CENTER)
@@ -135,7 +203,11 @@ class PCPage:
         self.sampler = stats.Sampler()
         self.page = Adw.PreferencesPage(); self.page.set_title("PC")
         self.page.set_icon_name("computer-symbolic")
+        load_css()
+        self.status = None
+        self._loading = False
         self._build()
+        self.refresh_status()
         # First sample after a full second, so the first CPU reading isn't a blip.
         self.timer = GLib.timeout_add_seconds(1, self._tick)
 
@@ -144,14 +216,35 @@ class PCPage:
         self.page.add(g); return g
 
     def _build(self):
-        g = self._group("Effective Memory", "Everything this PC can hold: RAM, then compressed RAM (zram), then swap on the SSD")
-        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        head.set_margin_top(4); head.set_margin_bottom(8)
-        self.headline = Gtk.Label(xalign=0); self.headline.add_css_class("title-1")
-        self.subline = Gtk.Label(xalign=0, wrap=True); self.subline.add_css_class("dim-label")
-        self.bar = MemoryBar()
-        head.append(self.headline); head.append(self.subline); head.append(self.bar)
-        g.add(head)
+        g = self._group("")
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        hero.add_css_class("card"); hero.add_css_class("pc-hero")
+        for side in ("top", "bottom", "start", "end"):
+            getattr(hero, f"set_margin_{side}")(0)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        inner.set_margin_top(22); inner.set_margin_bottom(22); inner.set_margin_start(26); inner.set_margin_end(26)
+        kicker = Gtk.Label(label="EFFECTIVE RAM", xalign=0); kicker.add_css_class("pc-kicker")
+        top = Gtk.Box(spacing=18)
+        self.hero_value = Gtk.Label(xalign=0); self.hero_value.add_css_class("pc-hero-value")
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, spacing=2)
+        self.hero_free = Gtk.Label(xalign=0); self.hero_free.add_css_class("title-2")
+        self.hero_mult = Gtk.Label(xalign=0); self.hero_mult.add_css_class("dim-label")
+        side.append(self.hero_free); side.append(self.hero_mult)
+        top.append(self.hero_value); top.append(side)
+        self.zones = ZoneBar()
+        self.zone_caption = Gtk.Box(spacing=22)
+        self.zone_labels = []
+        for rgb, name in ((FAST_C, "Full speed RAM"), (ZRAM_C, "Compressed RAM"), (DISK_C, "SSD swap")):
+            box = Gtk.Box(spacing=6); box.append(swatch(rgb)); label = Gtk.Label(xalign=0)
+            box.append(label); self.zone_caption.append(box); self.zone_labels.append((name, label))
+        self.hero_note = Gtk.Label(xalign=0, wrap=True); self.hero_note.add_css_class("dim-label")
+        for w in (kicker, top, self.zones, self.zone_caption, self.hero_note):
+            inner.append(w)
+        hero.append(inner); g.add(hero)
+        self._build_tune()
+
+        g = self._group("Where Your Memory Is", "Everything the PC is holding right now")
+        self.bar = MemoryBar(); g.add(self.bar)
         g = self._group("")
         self.rows = {}
         for key, title, sub, rgb in (
@@ -209,6 +302,182 @@ class PCPage:
         for key, title, rgb in (("rx", "Receiving", RX_C), ("tx", "Sending", TX_C)):
             row, label = value_row(title, "", rgb); self.net_rows[key] = (row, label); g.add(row)
 
+
+    # ------------------------------------------------------------ tuning controls
+    def _build_tune(self):
+        g = self._group("Tune", "Every change is checked for safety first and asks for your password. Nothing changes until you press Apply.")
+        self.eager_row = Adw.SpinRow.new_with_range(10, 180, 10)
+        self.eager_row.set_title("Swap eagerness (swappiness)")
+        self.eager_row.connect("notify::value", self._changed)
+        g.add(self.eager_row)
+        self.zram_row = Adw.ComboRow(title="Compressed RAM size (zram)")
+        self.zram_row.connect("notify::selected", self._changed); g.add(self.zram_row)
+        self.algo_row = Adw.ComboRow(title="Compression")
+        self.algo_row.set_model(Gtk.StringList.new(["zstd: squeezes the most", "lz4: fastest", "lzo-rle: light"]))
+        self.algo_row.connect("notify::selected", self._changed); g.add(self.algo_row)
+        self.file_row = Adw.ComboRow(title="SSD swap file")
+        self.file_row.connect("notify::selected", self._changed); g.add(self.file_row)
+        self.preview_row = Adw.ActionRow(title="After applying")
+        self.preview_label = Gtk.Label(xalign=1); self.preview_label.add_css_class("title-4")
+        self.preview_row.add_suffix(self.preview_label); g.add(self.preview_row)
+        actions = Adw.ActionRow(title="", subtitle="")
+        self.result_row = actions
+        self.reset_button = Gtk.Button(label="Restore recommended", valign=Gtk.Align.CENTER)
+        self.reset_button.connect("clicked", self._recommended)
+        self.apply_button = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)
+        self.apply_button.add_css_class("suggested-action"); self.apply_button.connect("clicked", self._apply)
+        actions.add_suffix(self.reset_button); actions.add_suffix(self.apply_button)
+        g.add(actions)
+        self.install_row = Adw.ActionRow(title="Compressed RAM needs zram-tools",
+                                         subtitle="A small Ubuntu package. Installing asks for your password.")
+        button = Gtk.Button(label="Install", valign=Gtk.Align.CENTER); button.connect("clicked", self._install_zram)
+        self.install_row.add_suffix(button); self.install_row.set_visible(False); g.add(self.install_row)
+
+        g = self._group("Quick Actions")
+        row = Adw.ActionRow(title="Free up file cache",
+                            subtitle="Drops cached copies of files to show more free RAM right away. Safe; it refills as files are read again.")
+        b = Gtk.Button(label="Free up", valign=Gtk.Align.CENTER); b.connect("clicked", lambda *_: self._run(["free-cache"]))
+        row.add_suffix(b); g.add(row)
+        self.reclaim_row = Adw.ActionRow(title="Move SSD swap back into RAM")
+        self.reclaim_button = Gtk.Button(label="Move back", valign=Gtk.Align.CENTER)
+        self.reclaim_button.connect("clicked", lambda *_: self._run(["reclaim"]))
+        self.reclaim_row.add_suffix(self.reclaim_button); g.add(self.reclaim_row)
+
+    def refresh_status(self):
+        try:
+            proc = Gio.Subprocess.new(["/usr/bin/python3", helper_path(), "status"],
+                                      Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+            proc.communicate_utf8_async(None, None, self._status_done)
+        except GLib.Error as exc:
+            self.result_row.set_subtitle(f"Could not read memory settings: {exc.message}")
+
+    def _status_done(self, proc, result):
+        try:
+            _, out, _ = proc.communicate_utf8_finish(result)
+            self.status = json.loads(out)
+        except Exception as exc:
+            self.result_row.set_subtitle(f"Could not read memory settings: {exc}")
+            return
+        st = self.status; self._loading = True
+        try:
+            self.eager_row.set_value(st["swappiness"])
+            self.zram_sizes = st["zram_sizes"]
+            self.zram_row.set_model(Gtk.StringList.new(["Off" if v == 0 else f"{v} GB" for v in self.zram_sizes]))
+            self.zram_row.set_selected(self._index(self.zram_sizes, st["zram_size"]))
+            self.algo_row.set_selected(self._index(st["algos"], st["zram_algo"]))
+            current_file = round(st["swapfile"]["size"] / stats.GB) if st["swapfile"]["active"] else 0
+            sizes = sorted(set(st["swapfile_sizes"]) | {current_file})
+            self.file_sizes = sizes
+            self.file_row.set_model(Gtk.StringList.new(["None" if v == 0 else f"{v} GB" for v in sizes]))
+            self.file_row.set_selected(self._index(sizes, current_file))
+            installed = st["zram_installed"]
+            for row in (self.zram_row, self.algo_row):
+                row.set_sensitive(installed)
+            self.install_row.set_visible(not installed)
+            self.file_row.set_sensitive(st["swapfile"]["supported"])
+            sf = st["swapfile"]
+            self.file_row.set_subtitle(f"{sf['path']} · {sf['disk_free'] / stats.GB:.0f} GB free on that drive, 50 GB always kept free"
+                                       if sf["supported"] else f"Needs an ext4 drive (this one is {sf['fstype']})")
+        finally:
+            self._loading = False
+        self._changed()
+
+    @staticmethod
+    def _index(options, value):
+        try:
+            return options.index(value)
+        except ValueError:
+            return 0
+
+    def _choice(self):
+        st = self.status
+        return {"swappiness": int(self.eager_row.get_value()),
+                "zram_size": self.zram_sizes[self.zram_row.get_selected()],
+                "zram_algo": st["algos"][self.algo_row.get_selected()],
+                "swapfile": self.file_sizes[self.file_row.get_selected()]}
+
+    def _current(self):
+        st = self.status
+        return {"swappiness": st["swappiness"], "zram_size": st["zram_size"], "zram_algo": st["zram_algo"],
+                "swapfile": round(st["swapfile"]["size"] / stats.GB) if st["swapfile"]["active"] else 0}
+
+    def _ceiling(self, choice):
+        st = self.status; e = st["effective"]
+        ratio = e["zram_ratio"] if choice["zram_algo"] == st["zram_algo"] else (3.0 if choice["zram_algo"] == "zstd" else 2.2)
+        file_now = st["swapfile"]["size"] if st["swapfile"]["active"] else 0
+        other_disk = e["disk_total"] - file_now
+        return e["ram_total"] + choice["zram_size"] * stats.GB * (1 - 1 / ratio) + other_disk + choice["swapfile"] * stats.GB
+
+    def _changed(self, *args):
+        if self._loading or not self.status:
+            return
+        choice, current = self._choice(), self._current()
+        self.eager_row.set_subtitle(eagerness_text(choice["swappiness"]))
+        z = choice["zram_size"]
+        ratio = 3.0 if choice["zram_algo"] == "zstd" else 2.2
+        self.zram_row.set_subtitle("Off" if z == 0 else
+                                   f"Adds about {z * (1 - 1 / ratio):.0f} GB; uses up to {z / ratio:.0f} GB of real RAM when full")
+        new, now = self._ceiling(choice) / stats.GB, self._ceiling(current) / stats.GB
+        delta = new - now
+        self.preview_label.set_label(f"{new:.0f} GB effective" + (f" ({delta:+.0f} GB)" if abs(delta) >= 0.5 else ""))
+        pending = choice != current
+        self.apply_button.set_sensitive(pending)
+        self.reset_button.set_sensitive(choice != {"swappiness": 100, "zram_size": 16, "zram_algo": "zstd", "swapfile": 48}
+                                        and self.status["zram_installed"])
+        self.preview_row.set_subtitle("No changes yet" if not pending else
+                                      "Grows swap before shrinking anything, and refuses if data would not fit")
+
+    def _recommended(self, *_):
+        r = self.status["recommended"]
+        self.eager_row.set_value(r["swappiness"])
+        self.zram_row.set_selected(self._index(self.zram_sizes, r["zram_size"]))
+        self.algo_row.set_selected(self._index(self.status["algos"], r["zram_algo"]))
+        if r["swapfile"] in self.file_sizes:
+            self.file_row.set_selected(self.file_sizes.index(r["swapfile"]))
+        self._changed()
+
+    def _apply(self, *_):
+        choice, current = self._choice(), self._current()
+        args = ["apply"]
+        if choice["swappiness"] != current["swappiness"]:
+            args += ["--swappiness", str(choice["swappiness"])]
+        if (choice["zram_size"], choice["zram_algo"]) != (current["zram_size"], current["zram_algo"]):
+            args += ["--zram-size", str(choice["zram_size"]), "--zram-algo", choice["zram_algo"]]
+        if choice["swapfile"] != current["swapfile"]:
+            args += ["--swapfile", str(choice["swapfile"])]
+        self._run(args)
+
+    def _install_zram(self, *_):
+        self._run(None, ["pkexec", "apt", "install", "-y", "zram-tools"])
+
+    def _run(self, args, argv=None):
+        argv = argv or ["/usr/bin/python3", helper_path(), *args]
+        self.apply_button.set_sensitive(False); self.reclaim_button.set_sensitive(False)
+        self.result_row.set_subtitle("Working… a password prompt may appear")
+        try:
+            proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+            proc.communicate_utf8_async(None, None, self._run_done)
+        except GLib.Error as exc:
+            self.result_row.set_subtitle(exc.message)
+
+    def _run_done(self, proc, result):
+        try:
+            _, out, err = proc.communicate_utf8_finish(result)
+        except GLib.Error as exc:
+            out, err = "", exc.message
+        status = proc.get_exit_status() if proc.get_if_exited() else 1
+        if status == 0:
+            self.result_row.set_subtitle((out or "Done.").strip().splitlines()[-1])
+        elif status in (126, 127):
+            self.result_row.set_subtitle("Cancelled. Nothing was changed.")
+        else:
+            message = (err or out or "Something went wrong.").strip().splitlines()[-1]
+            self.result_row.set_subtitle(message)
+            dialog = Adw.MessageDialog(transient_for=self.page.get_root(), heading="Not changed" if status == 3 else "Change failed",
+                                       body=message)
+            dialog.add_response("ok", "OK"); dialog.present()
+        self.refresh_status()
+
     def _visible(self):
         return self.stack.get_visible_child() is self.page and self.page.get_mapped()
 
@@ -220,12 +489,20 @@ class PCPage:
         if not self._visible():
             return True          # keep the history, skip the drawing
         e = d["effective"]
-        self.headline.set_label(f"{stats.gb(e['free'])} free of about {e['ceiling'] / stats.GB:.0f} GB")
-        ratio = f"{e['zram_ratio']:.1f} to 1" + ("" if e["zram_ratio_live"] else " (expected)")
-        self.subline.set_label(
-            f"{stats.gb(e['ram_total'], 0)} usable RAM, {stats.gb(e['zram_size'], 0)} zram at {ratio}, "
-            f"{stats.gb(e['disk_total'], 0)} swap on SSD. Full speed up to about {e['ram_total'] / stats.GB:.0f} GB, "
-            "a little slower in zram, much slower on the SSD.")
+        ceiling = e["ceiling"] / stats.GB
+        self.hero_value.set_label(f"{ceiling:.0f} GB")
+        self.hero_free.set_label(f"{stats.gb(e['free'])} free right now")
+        ratio = f"{e['zram_ratio']:.1f} to 1" + ("" if e["zram_ratio_live"] else " expected")
+        mult = e["ceiling"] / e["ram_total"] if e["ram_total"] else 1
+        self.hero_mult.set_label(f"{e['ram_total'] / stats.GB:.0f} GB of physical RAM, working like {mult:.1f}x that")
+        in_ram = max(0, e["ram_used"])
+        self.zones.set_zones([(e["ram_total"], in_ram, FAST_C), (e["zram_net"], e["zram_data"] - e["zram_ram"], ZRAM_C),
+                              (e["disk_total"], e["disk_used"], DISK_C)])
+        caps = (e["ram_total"], e["zram_net"], e["disk_total"])
+        for (name, label), cap in zip(self.zone_labels, caps):
+            label.set_label(f"{name}  {'+' if label is not self.zone_labels[0][1] else ''}{cap / stats.GB:.0f} GB")
+        self.hero_note.set_label(f"Programs see one big pool. The first {e['ram_total'] / stats.GB:.0f} GB runs at full speed, "
+                                 f"compressed RAM ({ratio}) is a little slower, SSD swap is much slower.")
         free_ram = max(0, e["ram_available"] - e["cache"])
         left = max(0, e["free"] - e["ram_available"])
         self.bar.set_parts([(e["programs"], RAM_C), (e["cache"], CACHE_C), (free_ram, FREE_C),
@@ -236,6 +513,14 @@ class PCPage:
         self.rows["zram"].set_label(f"{stats.gb(e['zram_data'])} in {stats.gb(e['zram_ram'])}")
         self.rows["disk"].set_label(f"{stats.gb(e['disk_used'])} of {stats.gb(e['disk_total'], 0)}")
         self.rows["left"].set_label(stats.gb(e["free"]))
+        if self.status is not None:
+            need = e["disk_used"]
+            fits = need and need + 3 * stats.GB <= e["ram_available"]
+            self.reclaim_button.set_sensitive(bool(fits))
+            self.reclaim_row.set_subtitle(
+                "Nothing is on SSD swap right now" if not need else
+                f"{stats.gb(need)} is on the SSD; brings it back for full speed" if fits else
+                f"{stats.gb(need)} is on the SSD, but there isn't enough free RAM to bring it back yet")
         m = self.sampler.mem
         self.mem_graph.set_series([(m["ram"], RAM_C, 2), (m["zram"], ZRAM_C, 2), (m["swap"], SWAP_C, 2), (m["effective"], EFF_C, 1.5)])
         values = {"ram": f"{stats.gb(e['ram_used'])} of {stats.gb(e['ram_total'])}",

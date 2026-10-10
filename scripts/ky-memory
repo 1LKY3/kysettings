@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""ky-memory: safe memory tuning for the KySettings PC tab.
+
+    ky-memory status                         (no admin) current settings + limits as JSON
+    ky-memory apply [--swappiness N] [--zram-size GB] [--zram-algo NAME] [--swapfile GB]
+    ky-memory free-cache                     drop clean file cache (it refills on its own)
+    ky-memory reclaim                        bring SSD-swapped data back into RAM, if it fits
+    ky-memory recommended                    swappiness 100, zram 16 GB zstd, swap file 48 GB
+
+Changing actions re-run themselves through pkexec. Every change is checked here,
+as root, before anything is touched: values must be in range, data that would be
+moved out of zram or a swap file must fit in free RAM plus the other swap with a
+2 GB margin, and a swap file must leave at least 50 GB free on its drive.
+"""
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+_here = os.path.dirname(os.path.realpath(__file__))
+sys.path[:0] = [_here, os.path.dirname(_here)]   # installed next to ky_stats.py, or run from the repo
+import ky_stats as stats  # noqa: E402
+
+GB = stats.GB
+MARGIN = 2 * GB
+DISK_RESERVE = 50 * GB
+SWAPPINESS_RANGE = (10, 180)
+ZRAM_SIZES = (0, 4, 8, 12, 16, 24, 32, 48, 64)
+SWAPFILE_SIZES = (0, 8, 16, 32, 48, 64, 96, 128, 192, 256)
+ALGOS = ("zstd", "lz4", "lzo-rle")
+SYSCTL = pathlib.Path("/etc/sysctl.d/90-swappiness.conf")
+ZRAM_CONF = pathlib.Path("/etc/default/zramswap")
+FSTAB = pathlib.Path("/etc/fstab")
+RECOMMENDED = {"swappiness": 100, "zram_size": 16, "zram_algo": "zstd", "swapfile": 48}
+
+
+class Unsafe(Exception):
+    pass
+
+
+def sh(*cmd, check=True):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if check and r.returncode:
+        raise RuntimeError(f"{' '.join(cmd)}: {(r.stderr or r.stdout).strip()}")
+    return r.stdout
+
+
+# ---------------------------------------------------------------- reading
+def swappiness():
+    return int(pathlib.Path("/proc/sys/vm/swappiness").read_text())
+
+
+def zram_installed():
+    return shutil.which("zramswap") is not None or pathlib.Path("/usr/sbin/zramswap").exists()
+
+
+def zram_config():
+    size, algo = 0, "zstd"
+    if ZRAM_CONF.exists():
+        for line in ZRAM_CONF.read_text().splitlines():
+            m = re.match(r"\s*(SIZE|ALGO)\s*=\s*(\S+)", line)
+            if m and m.group(1) == "SIZE":
+                size = int(m.group(2)) // 1024
+            elif m:
+                algo = m.group(2)
+    live = stats.read_zram()
+    if live:
+        size = round(sum(z["disksize"] for z in live) / GB)
+        algo = live[0]["algorithm"]
+    elif subprocess.run(["systemctl", "is-active", "--quiet", "zramswap"]).returncode:
+        size = 0
+    return size, algo
+
+
+def fs_of(path):
+    out = sh("findmnt", "-no", "TARGET,FSTYPE", "--target", str(path), check=False).split()
+    return (out[0], out[1]) if len(out) >= 2 else (None, None)
+
+
+def swapfile_path():
+    """The swap file this tool manages: the one in fstab if any, else a default location."""
+    for line in FSTAB.read_text().splitlines():
+        p = line.split()
+        if len(p) >= 3 and not line.lstrip().startswith("#") and p[2] == "swap" and p[0].startswith("/") and not p[0].startswith("/dev/"):
+            return pathlib.Path(p[0])
+    storage = pathlib.Path("/mnt/storage")
+    if storage.is_mount() and fs_of(storage)[1] == "ext4":
+        return storage / "swapfile"
+    return pathlib.Path("/swapfile-ky")
+
+
+def swapfile_info():
+    path = swapfile_path()
+    mount, fstype = fs_of(path.parent)
+    size = path.stat().st_size if path.exists() else 0
+    active = next((s for s in stats.read_swaps() if s["name"] == str(path)), None)
+    free = shutil.disk_usage(path.parent).free if path.parent.exists() else 0
+    return {"path": str(path), "size": size, "active": active is not None,
+            "used": active["used"] if active else 0, "supported": fstype == "ext4",
+            "fstype": fstype, "disk_free": free}
+
+
+def status():
+    mem = stats.read_meminfo(); swaps = stats.read_swaps(); zram = stats.read_zram()
+    e = stats.effective(mem, swaps, zram)
+    zsize, zalgo = zram_config()
+    sf = swapfile_info()
+    ram_gb = mem["MemTotal"] / GB
+    max_file = (sf["disk_free"] + sf["size"] - DISK_RESERVE) / GB
+    return {
+        "swappiness": swappiness(), "swappiness_range": SWAPPINESS_RANGE,
+        "zram_installed": zram_installed(), "zram_size": zsize, "zram_algo": zalgo,
+        "zram_sizes": [s for s in ZRAM_SIZES if s <= max(16, ram_gb * 1.5) or s == zsize], "algos": list(ALGOS),
+        "swapfile": sf, "swapfile_sizes": [s for s in SWAPFILE_SIZES if s <= max(0, max_file) or s * GB == sf["size"]],
+        "ram": mem["MemTotal"], "available": mem["MemAvailable"], "effective": e,
+        "recommended": RECOMMENDED,
+    }
+
+
+# ---------------------------------------------------------------- safety
+def room_outside(exclude_names, mem=None):
+    """Free RAM plus free space on swap devices other than `exclude_names`."""
+    mem = mem or stats.read_meminfo()
+    other = sum(s["size"] - s["used"] for s in stats.read_swaps() if s["name"] not in exclude_names)
+    return mem["MemAvailable"] + other
+
+
+def check_move(amount, exclude_names, what):
+    room = room_outside(exclude_names)
+    if amount + MARGIN > room:
+        raise Unsafe(f"{what} holds {amount / GB:.1f} GB, and there is only {room / GB:.1f} GB of room to move it to "
+                     f"(free RAM plus other swap, keeping a 2 GB margin). Close some programs and try again.")
+
+
+# ---------------------------------------------------------------- changes (root)
+def set_swappiness(n):
+    lo, hi = SWAPPINESS_RANGE
+    if not lo <= n <= hi:
+        raise Unsafe(f"Swappiness must be between {lo} and {hi}.")
+    SYSCTL.write_text(f"# Set by Ky Settings (PC tab) {time.strftime('%Y-%m-%d %H:%M')}\nvm.swappiness={n}\n")
+    pathlib.Path("/proc/sys/vm/swappiness").write_text(str(n))
+
+
+def set_zram(size_gb, algo):
+    if size_gb not in ZRAM_SIZES:
+        raise Unsafe(f"zram size must be one of {ZRAM_SIZES} GB.")
+    if algo not in ALGOS:
+        raise Unsafe(f"Compression must be one of {', '.join(ALGOS)}.")
+    if not zram_installed():
+        raise Unsafe("zram-tools is not installed.")
+    current_size, current_algo = zram_config()
+    if (size_gb, algo) == (current_size, current_algo):
+        return
+    live = stats.read_zram()
+    if live:
+        data = sum(z["data"] for z in live); own = sum(z["ram"] for z in live)
+        check_move(max(0, data - own), {z["name"] for z in live}, "Compressed RAM")
+    if ZRAM_CONF.exists() and not pathlib.Path(str(ZRAM_CONF) + ".ky-orig").exists():
+        shutil.copy2(ZRAM_CONF, str(ZRAM_CONF) + ".ky-orig")
+    if size_gb == 0:
+        sh("systemctl", "disable", "--now", "zramswap")
+        return
+    ZRAM_CONF.write_text(f"# Set by Ky Settings (PC tab) {time.strftime('%Y-%m-%d %H:%M')}\n"
+                         f"ALGO={algo}\nSIZE={size_gb * 1024}\nPRIORITY=100\n")
+    sh("systemctl", "enable", "zramswap")
+    sh("systemctl", "restart", "zramswap")
+
+
+def fstab_set_swapfile(path, present):
+    lines = FSTAB.read_text().splitlines(keepends=True)
+    keep = [l for l in lines if not (l.split()[:1] == [str(path)])]
+    keep = [l for l in keep if "Ky Settings swap file" not in l]
+    if present:
+        keep.append(f"# Ky Settings swap file (PC tab)\n{path} none swap sw,nofail,discard,pri=5 0 0\n")
+    backup = pathlib.Path("/etc/fstab.ky-orig")
+    if not backup.exists():
+        shutil.copy2(FSTAB, backup)
+    tmp = FSTAB.with_suffix(".ky-new"); tmp.write_text("".join(keep)); os.replace(tmp, FSTAB)
+
+
+def set_swapfile(size_gb):
+    if size_gb not in SWAPFILE_SIZES:
+        raise Unsafe(f"Swap file size must be one of {SWAPFILE_SIZES} GB.")
+    info = swapfile_info(); path = pathlib.Path(info["path"])
+    if size_gb * GB == info["size"] and (info["active"] or size_gb == 0):
+        return
+    if not info["supported"]:
+        raise Unsafe(f"Swap files are only managed on ext4 drives (this one is {info['fstype']}).")
+    if size_gb and size_gb * GB > info["disk_free"] + info["size"] - DISK_RESERVE:
+        raise Unsafe(f"A {size_gb} GB swap file would leave less than 50 GB free on {path.parent}.")
+    if info["active"] and info["used"]:
+        check_move(info["used"], {str(path)}, "The swap file")
+    fresh = path.with_name(path.name + ".ky-new")
+    if size_gb:
+        if fresh.exists():
+            fresh.unlink()
+        sh("fallocate", "-l", f"{size_gb}G", str(fresh))
+        os.chmod(fresh, 0o600)
+        sh("mkswap", "-L", "ky-swap", str(fresh))
+        sh("swapon", "-p", "5", "--discard", str(fresh))      # new room first, then retire the old file
+    if info["active"]:
+        sh("swapoff", str(path))
+    if path.exists():
+        path.unlink()
+    if size_gb:
+        os.rename(fresh, path)                               # same inode; stays active under its real name
+    fstab_set_swapfile(path, bool(size_gb))
+
+
+def apply(args):
+    plan = {}
+    it = iter(args)
+    for flag in it:
+        value = next(it, None)
+        if value is None:
+            raise Unsafe(f"{flag} needs a value.")
+        key = {"--swappiness": "swappiness", "--zram-size": "zram_size", "--zram-algo": "zram_algo", "--swapfile": "swapfile"}.get(flag)
+        if not key:
+            raise Unsafe(f"Unknown option {flag}.")
+        plan[key] = value if key == "zram_algo" else int(value)
+    done = []
+    if "swappiness" in plan:
+        set_swappiness(plan["swappiness"]); done.append(f"swappiness {plan['swappiness']}")
+    # Grow swap first and shrink last, so there is always the most room while moving data.
+    current_file = swapfile_info()["size"] // GB
+    if "swapfile" in plan and plan["swapfile"] >= current_file:
+        set_swapfile(plan["swapfile"]); done.append(f"swap file {plan['swapfile']} GB")
+    if "zram_size" in plan or "zram_algo" in plan:
+        size, algo = zram_config()
+        set_zram(plan.get("zram_size", size), plan.get("zram_algo", algo))
+        done.append(f"zram {plan.get('zram_size', size)} GB {plan.get('zram_algo', algo)}")
+    if "swapfile" in plan and plan["swapfile"] < current_file:
+        set_swapfile(plan["swapfile"]); done.append(f"swap file {plan['swapfile']} GB")
+    return "Applied: " + (", ".join(done) if done else "nothing to change")
+
+
+def free_cache():
+    sh("sync")
+    pathlib.Path("/proc/sys/vm/drop_caches").write_text("1")
+    return "File cache cleared. It refills as files are read again."
+
+
+def reclaim():
+    zram = {z["name"] for z in stats.read_zram()}
+    disk = [s for s in stats.read_swaps() if s["name"] not in zram and not s["name"].startswith("/dev/zram")]
+    used = sum(s["used"] for s in disk)
+    if not used:
+        return "Nothing is on SSD swap right now."
+    available = stats.read_meminfo()["MemAvailable"]
+    if used + MARGIN + GB > available:
+        raise Unsafe(f"{used / GB:.1f} GB is on SSD swap but only {available / GB:.1f} GB of RAM is free; "
+                     "bringing it back would just push other things out. Close some programs first.")
+    for s in disk:
+        sh("swapoff", s["name"])
+    sh("swapon", "-a")
+    return f"Moved {used / GB:.1f} GB from SSD swap back into RAM."
+
+
+def main(argv):
+    if not argv or argv[0] == "status":
+        print(json.dumps(status())); return 0
+    action, rest = argv[0], argv[1:]
+    if action not in ("apply", "free-cache", "reclaim", "recommended"):
+        print(__doc__, file=sys.stderr); return 2
+    if os.geteuid() != 0:
+        return subprocess.call(["/usr/bin/pkexec", "/usr/bin/python3", os.path.realpath(__file__), *argv])
+    try:
+        if action == "apply":
+            print(apply(rest))
+        elif action == "recommended":
+            r = RECOMMENDED
+            print(apply(["--swappiness", str(r["swappiness"]), "--zram-size", str(r["zram_size"]),
+                         "--zram-algo", r["zram_algo"], "--swapfile", str(r["swapfile"])]))
+        elif action == "free-cache":
+            print(free_cache())
+        else:
+            print(reclaim())
+        return 0
+    except Unsafe as exc:
+        print(f"Not changed: {exc}", file=sys.stderr); return 3
+    except Exception as exc:
+        print(f"Failed: {exc}", file=sys.stderr); return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
