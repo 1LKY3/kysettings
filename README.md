@@ -44,6 +44,15 @@ sudo apt remove python3-gi gir1.2-adw-1 python3-nautilus redsocks
 
 ## Features
 
+**PC** (0.4.7)
+- Live one-minute graphs in the style of Ubuntu's System Monitor: memory and
+  swap, all 16 CPU threads, network. Effective Memory shows everything the PC
+  can hold: RAM, then compressed RAM (zram), then swap on the SSD, with the
+  headline "X GB free of about Y GB" and one stacked bar. zram shows what it
+  stores, the real RAM it uses and the live compression ratio. Swap areas are
+  listed by priority. Read straight from /proc and /sys (`ky_stats.py`), drawn
+  by `ky_pc_page.py`; it samples once a second and draws only while the tab is open.
+
 **Display**
 - Use LXTerminal as Default — switches Ubuntu's system terminal alternative,
   GNOME terminal preference (including Ctrl+Alt+T and desktop folder actions),

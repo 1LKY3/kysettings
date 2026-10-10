@@ -43,6 +43,8 @@ mkdir -p ~/.local/share/backgrounds
 
 # Install main app
 cp ky_desktop.py ~/.local/bin/ky_desktop.py
+cp ky_stats.py ~/.local/bin/ky_stats.py
+cp ky_pc_page.py ~/.local/bin/ky_pc_page.py
 cp scripts/ky-desktop ~/.local/bin/ky-desktop
 chmod +x ~/.local/bin/ky-desktop
 cp kysettings.py ~/.local/bin/kysettings

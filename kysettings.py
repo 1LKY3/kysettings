@@ -18,9 +18,10 @@ import threading
 import urllib.request
 import pathlib
 import ky_desktop
+import ky_pc_page
 from datetime import datetime, timedelta
 
-__version__ = "0.4.6"
+__version__ = "0.4.7"
 UPDATE_MANIFEST_URL = "https://kysettings.dustforge.com/latest.json"
 
 
@@ -582,6 +583,7 @@ class KySettings(Adw.Application):
         self.add_keyboard_page()
         self.add_timers_page()
         self.add_privacy_page()
+        self.add_pc_page()
 
         self._initializing = False
 
@@ -2765,6 +2767,12 @@ class KySettings(Adw.Application):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+    def add_pc_page(self):
+        """Live CPU, effective memory (RAM + zram + swap) and network graphs."""
+        self.pc_page = ky_pc_page.PCPage(self.stack)
+        self.stack.add_titled(self.pc_page.page, "pc", "PC")
+        self.stack.get_page(self.pc_page.page).set_icon_name("computer-symbolic")
 
     def add_privacy_page(self):
         page = Adw.PreferencesPage()
