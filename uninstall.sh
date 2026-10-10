@@ -56,7 +56,7 @@ sudo rm -f /etc/apt/apt.conf.d/99pdanet-proxy 2>/dev/null || true
 # Remove binaries
 rm -f ~/.local/bin/kysettings
 rm -f ~/.local/bin/ky_desktop.py
-rm -f ~/.local/bin/ky_stats.py ~/.local/bin/ky_pc_page.py ~/.local/bin/ky-memory
+rm -f ~/.local/bin/ky_stats.py ~/.local/bin/ky_pc_page.py ~/.local/bin/ky-memory ~/.local/bin/ky-gpu
 rm -f ~/.local/bin/ky-desktop
 rm -f ~/.local/bin/pdanet-proxy
 rm -f ~/.local/bin/pdanet

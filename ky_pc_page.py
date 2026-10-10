@@ -10,6 +10,7 @@ from gi.repository import Gtk, Adw, GLib, Gio, Gdk
 import json
 import os
 import pathlib
+import threading
 
 import ky_stats as stats
 
@@ -31,12 +32,23 @@ def load_css():
     _css_loaded = True
 
 
-def helper_path():
+def helper_path(name="ky-memory"):
     here = pathlib.Path(os.path.realpath(__file__)).parent
-    for candidate in (here / "scripts" / "ky-memory", here / "ky-memory"):
+    for candidate in (here / "scripts" / name, here / name):
         if candidate.exists():
             return str(candidate)
-    return str(pathlib.Path.home() / ".local/bin/ky-memory")
+    return str(pathlib.Path.home() / ".local/bin" / name)
+
+
+LEVEL_TEXT = {"auto": ("Automatic (recommended)", "The card speeds up and slows down on its own"),
+              "low": ("Quiet", "Holds the lowest clocks. Cooler and quieter; games run slower"),
+              "high": ("Full speed", "Holds top clocks all the time. Snappier, but warmer and uses more power when idle")}
+PROFILE_TEXT = {"BOOTUP_DEFAULT": "The card decides for itself (recommended)",
+                "3D_FULL_SCREEN": "Ramps up fast and stays up for full-screen games",
+                "POWER_SAVING": "Keeps clocks down to save power and heat",
+                "VIDEO": "Smooth video playback at low power",
+                "VR": "Steady clocks for VR headsets",
+                "COMPUTE": "Steady clocks for AI models and number crunching"}
 
 
 def eagerness_text(n):
@@ -62,6 +74,9 @@ CACHE_C = (0.48, 0.55, 0.64)
 FREE_C = (0.30, 0.35, 0.44)
 FAST_C = (0.56, 0.66, 0.86)        # full-speed RAM zone
 DISK_C = (0.36, 0.80, 0.55)
+GPU_C = (0.66, 0.55, 0.95)         # GPU usage
+VRAM_C = (0.95, 0.67, 0.30)        # video memory
+POWER_C = (0.40, 0.80, 0.82)       # power draw
 
 
 def core_colors(n):
@@ -305,6 +320,9 @@ class PCPage:
                                 ("load", "Load average", "1, 5 and 15 minutes")):
             row, label = value_row(title, sub); self.cpu_rows[key] = label; g.add(row)
 
+        if self.sampler.gpu_dev:
+            self._build_gpu()
+
         g = self._group("Network History")
         self.net_graph = Graph(percent=False, fill_first=True); g.add(self.net_graph)
         g = self._group("")
@@ -312,6 +330,206 @@ class PCPage:
         for key, title, rgb in (("rx", "Receiving", RX_C), ("tx", "Sending", TX_C)):
             row, label = value_row(title, "", rgb); self.net_rows[key] = (row, label); g.add(row)
 
+
+    # ------------------------------------------------------------ GPU
+    def _build_gpu(self):
+        self.gpu_group = self._group("GPU History")
+        self.gpu_graph = Graph(height=170); self.gpu_group.add(self.gpu_graph)
+        legend = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=3, column_spacing=14, row_spacing=2); legend.set_margin_top(6)
+        self.gpu_legend = {}
+        for key, name, rgb in (("busy", "Usage", GPU_C), ("vram", "Video memory", VRAM_C), ("power", "Power", POWER_C)):
+            box = Gtk.Box(spacing=6); box.append(swatch(rgb))
+            label = Gtk.Label(xalign=0); box.append(label); legend.append(box); self.gpu_legend[key] = (name, label)
+        self.gpu_group.add(legend)
+        g = self._group("")
+        self.gpu_rows = {}
+        for key, title, sub in (("temp", "Temperature", ""), ("fan", "Fan", ""), ("clocks", "Clocks", "Core and memory"),
+                                ("spill", "Spilled into system RAM", "Video memory that didn't fit on the card. Slower, but it keeps things running"),
+                                ("link", "Connection", "PCIe link to the motherboard")):
+            row, label = value_row(title, sub); self.gpu_rows[key] = (row, label); g.add(row)
+
+        self.vram_group = self._group("Video Memory by App",
+                                      "What each program holds on the card. When the card fills up, the overflow moves to system RAM: things slow down, but keep running.")
+        self.vram_warning = Adw.ActionRow(title="Video memory is nearly full",
+                                          subtitle="Expect stutter. Closing a game or AI model frees it up.")
+        self.vram_warning.add_css_class("error"); self.vram_warning.set_visible(False); self.vram_group.add(self.vram_warning)
+        self.vram_rows = []
+        self._apps_busy = False; self._apps_due = 0
+
+        g = self._group("Tune GPU", "Settings the driver manages itself. Heat protection always stays on, and there is no overclocking. "
+                                    "Asks for your password; nothing changes until you press Apply.")
+        self.level_row = Adw.ComboRow(title="Performance")
+        self.level_row.set_model(Gtk.StringList.new([LEVEL_TEXT[k][0] for k in ("auto", "low", "high")]))
+        self.level_row.connect("notify::selected", self._gpu_changed); g.add(self.level_row)
+        self.profile_row = Adw.ComboRow(title="Workload")
+        self.profile_row.connect("notify::selected", self._gpu_changed); g.add(self.profile_row)
+        self.cap_row = Adw.SpinRow.new_with_range(1, 1000, 1)
+        self.cap_row.set_title("Power limit (watts)")
+        self.cap_row.connect("notify::value", self._gpu_changed); g.add(self.cap_row)
+        self.gpu_result = Adw.ActionRow(title="", subtitle="")
+        self.gpu_reset = Gtk.Button(label="Restore defaults", valign=Gtk.Align.CENTER)
+        self.gpu_reset.connect("clicked", lambda *_: self._gpu_run(["recommended"]))
+        self.gpu_apply = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)
+        self.gpu_apply.add_css_class("suggested-action"); self.gpu_apply.connect("clicked", self._gpu_apply_clicked)
+        self.gpu_result.add_suffix(self.gpu_reset); self.gpu_result.add_suffix(self.gpu_apply); g.add(self.gpu_result)
+        self.gpu_status = None; self._gpu_loading = False
+        self.gpu_refresh()
+
+    def gpu_refresh(self):
+        try:
+            proc = Gio.Subprocess.new(["/usr/bin/python3", helper_path("ky-gpu"), "status"],
+                                      Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+            proc.communicate_utf8_async(None, None, self._gpu_status_done)
+        except GLib.Error as exc:
+            self.gpu_result.set_subtitle(f"Could not read GPU settings: {exc.message}")
+
+    def _gpu_status_done(self, proc, result):
+        try:
+            _, out, _ = proc.communicate_utf8_finish(result)
+            st = json.loads(out)
+        except Exception as exc:
+            self.gpu_result.set_subtitle(f"Could not read GPU settings: {exc}"); return
+        if "error" in st:
+            self.gpu_result.set_subtitle(st["error"]); self.gpu_apply.set_sensitive(False); self.gpu_reset.set_sensitive(False); return
+        self.gpu_status = st; self._gpu_loading = True
+        try:
+            self.gpu_group.set_description(st["name"])
+            self.level_row.set_selected(self._index(st["levels"], st["level"]) if st["level"] in st["levels"] else 0)
+            self.gpu_profiles = st["profiles"]
+            self.profile_row.set_model(Gtk.StringList.new([p["label"] for p in self.gpu_profiles]))
+            self.profile_row.set_selected(self._index([p["name"] for p in self.gpu_profiles], st["profile"]))
+            has_cap = st["power_min"] is not None and st["power_max"] is not None
+            self.cap_row.set_visible(has_cap)
+            if has_cap:
+                self.cap_row.set_range(st["power_min"], st["power_max"])
+                self.cap_row.set_value(round(st["power_cap"]))
+        finally:
+            self._gpu_loading = False
+        self._gpu_changed()
+
+    def _gpu_choice(self):
+        st = self.gpu_status
+        return {"level": st["levels"][self.level_row.get_selected()],
+                "profile": self.gpu_profiles[self.profile_row.get_selected()]["name"] if self.gpu_profiles else st["profile"],
+                "power_cap": int(self.cap_row.get_value()) if self.cap_row.get_visible() else None}
+
+    def _gpu_current(self):
+        st = self.gpu_status
+        return {"level": st["level"], "profile": st["profile"],
+                "power_cap": round(st["power_cap"]) if st["power_cap"] is not None and self.cap_row.get_visible() else None}
+
+    def _gpu_changed(self, *_):
+        if self._gpu_loading or not self.gpu_status:
+            return
+        st = self.gpu_status; choice = self._gpu_choice()
+        self.level_row.set_subtitle(LEVEL_TEXT[choice["level"]][1])
+        self.profile_row.set_subtitle(PROFILE_TEXT.get(choice["profile"], ""))
+        if self.cap_row.get_visible():
+            self.cap_row.set_subtitle(f"The driver allows {st['power_min']:.0f} to {st['power_max']:.0f} W. Lower runs cooler and quieter")
+        pending = choice != self._gpu_current()
+        default = {"level": "auto", "profile": "BOOTUP_DEFAULT",
+                   "power_cap": round(st["power_default"]) if st["power_default"] and self.cap_row.get_visible() else None}
+        self.gpu_apply.set_sensitive(pending)
+        self.gpu_reset.set_sensitive(self._gpu_current() != default)
+        self.gpu_result.set_subtitle("Not applied yet" if pending else
+                                     "Kept after restart" if st["saved"] else "Driver defaults")
+
+    def _gpu_apply_clicked(self, *_):
+        choice, current = self._gpu_choice(), self._gpu_current()
+        args = ["apply"]
+        for key, flag in (("level", "--level"), ("profile", "--profile"), ("power_cap", "--power-cap")):
+            if choice[key] != current[key] and choice[key] is not None:
+                args += [flag, str(choice[key])]
+        self._gpu_run(args)
+
+    def _gpu_run(self, args):
+        self.gpu_apply.set_sensitive(False); self.gpu_reset.set_sensitive(False)
+        self.gpu_result.set_subtitle("Working… a password prompt may appear")
+        try:
+            proc = Gio.Subprocess.new(["/usr/bin/python3", helper_path("ky-gpu"), *args],
+                                      Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+            proc.communicate_utf8_async(None, None, self._gpu_run_done)
+        except GLib.Error as exc:
+            self.gpu_result.set_subtitle(exc.message)
+
+    def _gpu_run_done(self, proc, result):
+        try:
+            _, out, err = proc.communicate_utf8_finish(result)
+        except GLib.Error as exc:
+            out, err = "", exc.message
+        status = proc.get_exit_status() if proc.get_if_exited() else 1
+        message = None
+        if status in (126, 127):
+            message = "Cancelled. Nothing was changed."
+        elif status != 0:
+            message = (err or out or "Something went wrong.").strip().splitlines()[-1]
+            dialog = Adw.MessageDialog(transient_for=self.page.get_root(), heading="Not changed" if status == 3 else "Change failed", body=message)
+            dialog.add_response("ok", "OK"); dialog.present()
+        else:
+            message = (out or "Done.").strip().splitlines()[-1]
+        self.gpu_refresh()
+        GLib.timeout_add(400, lambda: (self.gpu_result.set_subtitle(message), False)[1])
+
+    def _scan_apps(self):
+        def work():
+            try:
+                apps = stats.read_gpu_apps()
+            except Exception:
+                apps = None
+            GLib.idle_add(self._apps_done, apps)
+        self._apps_busy = True
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apps_done(self, apps):
+        self._apps_busy = False
+        if apps is None:
+            return False
+        g = self.sampler.latest.get("gpu") or {}
+        used = g.get("vram_used") or 0
+        shown = [a for a in apps if a[2] >= 64 * 1024 * 1024][:6]
+        rest = max(0, used - sum(a[2] for a in shown))
+        entries = [(name, f"Process {pid}", vram) for pid, name, vram in shown]
+        if rest >= 128 * 1024 * 1024:     # apps share some buffers, so the sum can exceed the total
+            entries.append(("Everything else", "Smaller apps, the desktop and the driver", rest))
+        while len(self.vram_rows) < len(entries):
+            row, label = value_row("", "")
+            bar = Gtk.LevelBar(); bar.set_size_request(140, -1); bar.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(bar); self.vram_group.add(row); self.vram_rows.append((row, label, bar))
+        total = g.get("vram_total") or 1
+        for i, (row, label, bar) in enumerate(self.vram_rows):
+            if i >= len(entries):
+                row.set_visible(False); continue
+            name, sub, vram = entries[i]
+            row.set_visible(True); row.set_title(GLib.markup_escape_text(name)); row.set_subtitle(sub)
+            label.set_label(stats.gb(vram, 2)); bar.set_value(min(1.0, vram / total))
+        return False
+
+    def _tick_gpu(self, g):
+        n = self.sampler.gpu
+        self.gpu_graph.set_series([(n["busy"], GPU_C, 2), (n["vram"], VRAM_C, 2), (n["power"], POWER_C, 1.5)])
+        vt = g["vram_total"] or 0
+        values = {"busy": f"{g['busy']:.0f} %" if g["busy"] is not None else "n/a",
+                  "vram": f"{stats.gb(g['vram_used'])} of {stats.gb(vt)}" if vt else "n/a",
+                  "power": f"{g['power']:.0f} of {g['power_cap']:.0f} W" if g["power"] is not None and g["power_cap"] else "n/a"}
+        for key, (name, label) in self.gpu_legend.items():
+            label.set_label(f"{name}  {values[key]}")
+        t = g["temps"]
+        parts = [f"{t[k]:.0f} °C {k}" for k in ("edge", "junction", "mem") if t.get(k) is not None]
+        self.gpu_rows["temp"][1].set_label("  ".join(parts).replace("junction", "hotspot") or "n/a")
+        if g.get("temp_limit"):
+            self.gpu_rows["temp"][0].set_subtitle(f"The card slows itself down before the hotspot reaches {g['temp_limit']:.0f} °C")
+        if g["fan"] is not None:
+            pct = f" ({100 * g['fan'] / g['fan_max']:.0f} %)" if g["fan_max"] else ""
+            self.gpu_rows["fan"][1].set_label(f"{g['fan']:.0f} RPM{pct}")
+            self.gpu_rows["fan"][0].set_subtitle("Automatic, controlled by the card")
+        self.gpu_rows["clocks"][1].set_label(" / ".join(f"{c:.0f} MHz" for c in (g["core_clock"], g["mem_clock"]) if c is not None) or "n/a")
+        self.gpu_rows["spill"][1].set_label(f"{stats.gb(g['gtt_used'])} of {stats.gb(g['gtt_total'], 0)}" if g["gtt_total"] else "n/a")
+        self.gpu_rows["link"][1].set_label(f"{g['link'][0]} x{g['link'][1]}" if g.get("link") else "n/a")
+        self.vram_warning.set_visible(bool(vt) and g["vram_used"] / vt >= 0.92)
+        self._apps_due -= 1
+        if self._apps_due <= 0 and not self._apps_busy:
+            self._apps_due = 3
+            self._scan_apps()
 
     # ------------------------------------------------------------ tuning controls
     def _build_tune(self):
@@ -569,6 +787,8 @@ class PCPage:
         self.cpu_rows["total"].set_label(f"{d['cpu'][0]:.0f} %")
         self.cpu_rows["temp"].set_label(f"{d['temp']:.0f} °C" if d["temp"] is not None else "n/a")
         self.cpu_rows["load"].set_label("  ".join(f"{x:.2f}" for x in d["load"]))
+        if d.get("gpu") and self.sampler.gpu_dev:
+            self._tick_gpu(d["gpu"])
         n = self.sampler.net
         self.net_graph.set_series([(n["rx"], RX_C, 2), (n["tx"], TX_C, 2)])
         self.net_rows["rx"][1].set_label(stats.rate(d["rx"]))

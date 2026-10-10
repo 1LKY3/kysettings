@@ -47,6 +47,8 @@ cp ky_stats.py ~/.local/bin/ky_stats.py
 cp ky_pc_page.py ~/.local/bin/ky_pc_page.py
 cp scripts/ky-memory ~/.local/bin/ky-memory
 chmod +x ~/.local/bin/ky-memory
+cp scripts/ky-gpu ~/.local/bin/ky-gpu
+chmod +x ~/.local/bin/ky-gpu
 cp scripts/ky-desktop ~/.local/bin/ky-desktop
 chmod +x ~/.local/bin/ky-desktop
 cp kysettings.py ~/.local/bin/kysettings

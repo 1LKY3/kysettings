@@ -44,10 +44,10 @@ sudo apt remove python3-gi gir1.2-adw-1 python3-nautilus redsocks
 
 ## Features
 
-**PC** (0.4.9)
+**PC** (0.5.1, the first tab and the one Ky Settings opens on)
 - Two columns: everything about RAM on the left (effective RAM card, Tune, quick
-  actions, where memory is, memory history, zram, swap areas); CPU and network on
-  the right. `KYSETTINGS_PAGE=pc KYSETTINGS_MAXIMIZED=1 kysettings` opens straight on it.
+  actions, where memory is, memory history, zram, swap areas); CPU, GPU and network
+  on the right. `KYSETTINGS_PAGE=pc KYSETTINGS_MAXIMIZED=1 kysettings` opens straight on it.
 - **Effective RAM is the headline:** one big number for everything the PC can
   hold (RAM, then compressed RAM, then SSD swap), free space right now, how many
   times the physical RAM that works out to, and a speed-zone bar showing how full
@@ -62,6 +62,16 @@ sudo apt remove python3-gi gir1.2-adw-1 python3-nautilus redsocks
   `.ky-orig`. If zram-tools is missing, an Install button offers it.
 - **Quick actions:** free up file cache, and move SSD swap back into RAM (only
   offered when it fits with room to spare).
+- **GPU** (AMD cards on amdgpu): usage, video memory and power graph; temperatures,
+  fan, clocks, video memory spilled into system RAM, PCIe link; video memory by app
+  (refreshed every 3 seconds in the background, with a warning past 92 % full).
+  **Tune GPU** offers only what the driver manages itself: performance (automatic,
+  quiet, full speed), workload profile (Default, Gaming, Power saving, Video, VR,
+  Compute) and a power limit inside the driver's own range. No overclocking,
+  undervolting or manual fan control. Changes go through `ky-gpu` with one password
+  prompt; non-default settings come back after a restart through a root-owned
+  `/usr/local/sbin/ky-gpu-restore` with the values baked in (`ky-gpu.service`).
+  Restore defaults removes both.
 - Live one-minute graphs in the style of Ubuntu's System Monitor for memory and
   swap, all CPU threads and network; samples once a second, draws only while open.
 

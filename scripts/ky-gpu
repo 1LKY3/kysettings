@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""ky-gpu: safe GPU tuning for the KySettings PC tab (AMD cards, amdgpu driver).
+
+    ky-gpu status                                     (no admin) current settings + limits as JSON
+    ky-gpu apply [--level L] [--profile NAME] [--power-cap W]
+    ky-gpu recommended                                back to the driver's defaults
+
+Only settings the driver manages itself are offered: performance level
+(auto, low, high), workload profile, and a power limit inside the driver's own
+min..max range. Heat protection stays with the card. No overclocking,
+undervolting or manual fan control.
+
+Changing actions re-run themselves through pkexec. Applied settings come back
+after a restart through a small root-owned boot script written here, with the
+values baked in (it never runs code from your home folder).
+"""
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+_here = os.path.dirname(os.path.realpath(__file__))
+sys.path[:0] = [_here, os.path.dirname(_here)]
+import ky_stats as stats  # noqa: E402
+
+LEVELS = ("auto", "low", "high")
+PROFILES = {"BOOTUP_DEFAULT": "Default", "3D_FULL_SCREEN": "Gaming", "POWER_SAVING": "Power saving",
+            "VIDEO": "Video", "VR": "VR", "COMPUTE": "Compute (AI models)"}
+UNIT = pathlib.Path("/etc/systemd/system/ky-gpu.service")
+RESTORE = pathlib.Path("/usr/local/sbin/ky-gpu-restore")
+
+
+class Unsafe(Exception):
+    pass
+
+
+def gpu():
+    g = stats.find_gpu()
+    if not g:
+        raise Unsafe("No supported GPU found. GPU tuning needs an AMD card on the amdgpu driver.")
+    return g
+
+
+def read(path):
+    return pathlib.Path(path).read_text().strip()
+
+
+def parse_profiles(text):
+    """[(index, NAME, active)] from pp_power_profile_mode, any card generation."""
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*(\d+)\s+([A-Z0-9_]+)\s*(\*)?\s*:?", line)
+        if m:
+            out.append((int(m.group(1)), m.group(2), bool(m.group(3))))
+    return out
+
+
+def card_name(pci):
+    try:
+        fields = re.findall(r'"([^"]*)"', subprocess.run(["lspci", "-mm", "-s", pci], capture_output=True, text=True).stdout)
+    except OSError:
+        return "Graphics card"
+    # quoted fields: class, vendor, device, card maker, card model
+    if len(fields) >= 5 and fields[4]:
+        brand = re.search(r"\[([^\]]+)\]$", fields[3])
+        maker = brand.group(1) if brand else fields[3].split()[0] if fields[3] else ""
+        return re.sub(r"\s*\[[^\]]*\]$", "", f"{maker} {fields[4]}").strip()
+    return fields[2] if len(fields) > 2 else "Graphics card"
+
+
+def status(g=None):
+    g = g or gpu(); dev, hw = g["device"], g["hwmon"] or ""
+    profiles = parse_profiles(read(f"{dev}/pp_power_profile_mode")) if os.path.exists(f"{dev}/pp_power_profile_mode") else []
+    cap = lambda name: stats._num(f"{hw}/{name}", 1e6)
+    return {
+        "name": card_name(g["pci"]), "pci": g["pci"],
+        "level": read(f"{dev}/power_dpm_force_performance_level"), "levels": list(LEVELS),
+        "profiles": [{"index": i, "name": n, "label": PROFILES[n], "active": a} for i, n, a in profiles if n in PROFILES],
+        "profile": next((n for _, n, a in profiles if a), None),
+        "power_cap": cap("power1_cap"), "power_min": cap("power1_cap_min"), "power_max": cap("power1_cap_max"),
+        "power_default": cap("power1_cap_default"),
+        "fan_auto": stats._num(f"{hw}/pwm1_enable") in (None, 2),
+        "saved": UNIT.exists(),
+    }
+
+
+# ---------------------------------------------------------------- changes (root)
+def plan_from(args, st):
+    plan = {}; it = iter(args)
+    for flag in it:
+        value = next(it, None)
+        if value is None:
+            raise Unsafe(f"{flag} needs a value.")
+        if flag == "--level":
+            if value not in LEVELS:
+                raise Unsafe(f"Performance level must be one of {', '.join(LEVELS)}.")
+            plan["level"] = value
+        elif flag == "--profile":
+            match = next((p for p in st["profiles"] if p["name"] == value), None)
+            if not match:
+                raise Unsafe(f"Unknown workload profile {value}.")
+            plan["profile"] = match
+        elif flag == "--power-cap":
+            watts = int(value); lo, hi = st["power_min"], st["power_max"]
+            if lo is None or hi is None:
+                raise Unsafe("This card does not offer a power limit.")
+            if not lo <= watts <= hi:
+                raise Unsafe(f"Power limit must be between {lo:.0f} and {hi:.0f} W.")
+            plan["power_cap"] = watts
+        else:
+            raise Unsafe(f"Unknown option {flag}.")
+    return plan
+
+
+def write_settings(g, plan):
+    dev, hw = g["device"], g["hwmon"]
+    if "level" in plan:
+        pathlib.Path(f"{dev}/power_dpm_force_performance_level").write_text(plan["level"])
+    if "profile" in plan:
+        pathlib.Path(f"{dev}/pp_power_profile_mode").write_text(str(plan["profile"]["index"]))
+    if "power_cap" in plan:
+        pathlib.Path(f"{hw}/power1_cap").write_text(str(plan["power_cap"] * 1_000_000))
+
+
+def boot_script(pci, level, profile_index, power_cap):
+    """Shell run at boot by ky-gpu.service; values are baked in, nothing is read from user files."""
+    return f"""#!/bin/sh
+# Written by Ky Settings (PC tab). Restores GPU settings at boot. Remove with: ky-gpu recommended
+dev=/sys/bus/pci/devices/{pci}
+for i in $(seq 1 30); do [ -e "$dev/power_dpm_force_performance_level" ] && break; sleep 1; done
+echo {level} > "$dev/power_dpm_force_performance_level"
+echo {profile_index} > "$dev/pp_power_profile_mode"
+for cap in "$dev"/hwmon/hwmon*/power1_cap; do echo {power_cap * 1_000_000} > "$cap"; done
+exit 0
+"""
+
+
+UNIT_TEXT = """[Unit]
+Description=Ky Settings GPU settings
+After=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ky-gpu-restore
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def save_for_boot(g, st):
+    default = st["power_default"] or st["power_max"]
+    is_default = (st["level"] == "auto" and st["profile"] in (None, "BOOTUP_DEFAULT")
+                  and (st["power_cap"] is None or round(st["power_cap"]) == round(default)))
+    if is_default:
+        forget_boot()
+        return False
+    profile = next(p["index"] for p in st["profiles"] if p["name"] == st["profile"])
+    RESTORE.parent.mkdir(parents=True, exist_ok=True)
+    RESTORE.write_text(boot_script(g["pci"], st["level"], profile, round(st["power_cap"])))
+    os.chmod(RESTORE, 0o755)
+    UNIT.write_text(UNIT_TEXT)
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    subprocess.run(["systemctl", "enable", "ky-gpu.service"], capture_output=True, check=False)
+    return True
+
+
+def forget_boot():
+    if UNIT.exists():
+        subprocess.run(["systemctl", "disable", "ky-gpu.service"], capture_output=True, check=False)
+        UNIT.unlink()
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+    if RESTORE.exists():
+        RESTORE.unlink()
+
+
+def apply(args):
+    g = gpu(); st = status(g)
+    plan = plan_from(args, st)
+    write_settings(g, plan)
+    after = status(g)
+    kept = save_for_boot(g, after)
+    done = []
+    if "level" in plan:
+        done.append(f"performance {plan['level']}")
+    if "profile" in plan:
+        done.append(f"profile {plan['profile']['label']}")
+    if "power_cap" in plan:
+        done.append(f"power limit {plan['power_cap']} W")
+    return ("Applied: " + (", ".join(done) if done else "nothing to change")
+            + (". Kept after restart." if kept else ". Driver defaults."))
+
+
+def recommended():
+    g = gpu(); st = status(g)
+    args = ["--level", "auto", "--profile", "BOOTUP_DEFAULT"]
+    if st["power_default"]:
+        args += ["--power-cap", str(round(st["power_default"]))]
+    return apply(args)
+
+
+def main(argv):
+    if not argv or argv[0] == "status":
+        try:
+            print(json.dumps(status()))
+        except Unsafe as exc:
+            print(json.dumps({"error": str(exc)}))
+        return 0
+    action = argv[0]
+    if action not in ("apply", "recommended"):
+        print(__doc__, file=sys.stderr); return 2
+    if os.geteuid() != 0:
+        return subprocess.call(["/usr/bin/pkexec", "/usr/bin/python3", os.path.realpath(__file__), *argv])
+    try:
+        print(apply(argv[1:]) if action == "apply" else recommended())
+        return 0
+    except Unsafe as exc:
+        print(f"Not changed: {exc}", file=sys.stderr); return 3
+    except Exception as exc:
+        print(f"Failed: {exc}", file=sys.stderr); return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -170,6 +170,101 @@ def rate(bytes_per_s):
     return f"{bytes_per_s:.0f} B/s"
 
 
+# ---------------------------------------------------------------- GPU (amdgpu sysfs)
+def find_gpu(root="/sys/class/drm"):
+    """The first GPU whose driver reports load (amdgpu does): {device, hwmon} paths, or None."""
+    try:
+        cards = sorted(n for n in os.listdir(root) if n.startswith("card") and "-" not in n)
+    except OSError:
+        return None
+    for name in cards:
+        dev = os.path.realpath(os.path.join(root, name, "device"))
+        if not os.path.exists(os.path.join(dev, "gpu_busy_percent")):
+            continue
+        hw = os.path.join(dev, "hwmon")
+        hwmon = next((os.path.join(hw, h) for h in sorted(os.listdir(hw))), None) if os.path.isdir(hw) else None
+        return {"device": dev, "hwmon": hwmon, "pci": os.path.basename(dev)}
+    return None
+
+
+def _num(path, scale=1.0):
+    try:
+        with open(path) as f:
+            return int(f.read().split()[0]) / scale
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def read_gpu(gpu):
+    """Load, video memory, temperatures, power, fan and clocks for one GPU."""
+    dev, hw = gpu["device"], gpu["hwmon"] or ""
+    out = {"busy": _num(f"{dev}/gpu_busy_percent"), "mem_busy": _num(f"{dev}/mem_busy_percent"),
+           "vram_used": _num(f"{dev}/mem_info_vram_used"), "vram_total": _num(f"{dev}/mem_info_vram_total"),
+           "gtt_used": _num(f"{dev}/mem_info_gtt_used"), "gtt_total": _num(f"{dev}/mem_info_gtt_total"),
+           "power": _num(f"{hw}/power1_average", 1e6) or _num(f"{hw}/power1_input", 1e6),
+           "power_cap": _num(f"{hw}/power1_cap", 1e6),
+           "fan": _num(f"{hw}/fan1_input"), "fan_max": _num(f"{hw}/fan1_max"),
+           "core_clock": _num(f"{hw}/freq1_input", 1e6), "mem_clock": _num(f"{hw}/freq2_input", 1e6),
+           "temps": {}}
+    for i in range(1, 6):
+        try:
+            label = pathlib.Path(f"{hw}/temp{i}_label").read_text().strip()
+        except OSError:
+            continue
+        out["temps"][label] = _num(f"{hw}/temp{i}_input", 1000)
+    out["temp_limit"] = _num(f"{hw}/temp2_crit", 1000)
+    try:
+        out["link"] = (pathlib.Path(f"{dev}/current_link_speed").read_text().strip(),
+                       pathlib.Path(f"{dev}/current_link_width").read_text().strip())
+    except OSError:
+        out["link"] = None
+    return out
+
+
+def read_gpu_apps(proc="/proc"):
+    """[(pid, name, vram_bytes)] for programs holding video memory, largest first.
+
+    Reads only file handles open on /dev/dri, deduplicated by DRM client, so a
+    full pass costs well under 0.1 s. Programs owned by other users are skipped
+    (their memory still counts in the total)."""
+    clients = {}
+    for pid in os.listdir(proc):
+        if not pid.isdigit():
+            continue
+        try:
+            fds = os.listdir(f"{proc}/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if not os.readlink(f"{proc}/{pid}/fd/{fd}").startswith("/dev/dri/"):
+                    continue
+                with open(f"{proc}/{pid}/fdinfo/{fd}") as f:
+                    info = f.read()
+            except OSError:
+                continue
+            client = vram = None
+            for line in info.splitlines():
+                key, _, value = line.partition(":")
+                if key == "drm-client-id":
+                    client = value.strip()
+                elif key == "drm-memory-vram":
+                    vram = int(value.split()[0]) * KB
+            if client is not None and vram is not None:
+                clients[client] = (pid, vram)
+    per_pid = {}
+    for pid, vram in clients.values():
+        per_pid[pid] = per_pid.get(pid, 0) + vram
+    apps = []
+    for pid, vram in per_pid.items():
+        try:
+            name = pathlib.Path(f"{proc}/{pid}/comm").read_text().strip()
+        except OSError:
+            continue
+        apps.append((int(pid), name, vram))
+    return sorted(apps, key=lambda a: -a[2])
+
+
 class Sampler:
     """Keeps one minute of history for the graphs."""
     SECONDS = 60
@@ -181,6 +276,8 @@ class Sampler:
         self.cpu = [[None] * self.SECONDS for _ in range(n)]       # [0] = overall
         self.mem = {k: [None] * self.SECONDS for k in ("ram", "swap", "zram", "effective")}
         self.net = {k: [None] * self.SECONDS for k in ("rx", "tx")}
+        self.gpu_dev = find_gpu()
+        self.gpu = {k: [None] * self.SECONDS for k in ("busy", "vram", "power")}
         self.latest = {}
 
     @staticmethod
@@ -205,4 +302,10 @@ class Sampler:
         self.latest = {"cpu": pct, "effective": e, "swaps": swaps, "zram": zram,
                        "temp": read_cpu_temp(), "load": load_average(),
                        "rx": self.net["rx"][-1], "tx": self.net["tx"][-1], "rx_total": rx, "tx_total": tx}
+        if self.gpu_dev:
+            g = read_gpu(self.gpu_dev)
+            self._push(self.gpu["busy"], g["busy"])
+            self._push(self.gpu["vram"], 100 * g["vram_used"] / g["vram_total"] if g["vram_total"] else None)
+            self._push(self.gpu["power"], 100 * g["power"] / g["power_cap"] if g["power"] and g["power_cap"] else None)
+            self.latest["gpu"] = g
         return self.latest
