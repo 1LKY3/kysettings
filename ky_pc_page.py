@@ -15,8 +15,9 @@ import ky_stats as stats
 
 PC_CSS = b"""
 .pc-hero { background-image: linear-gradient(135deg, rgba(90,102,121,0.55), rgba(37,45,59,0.95)); border-radius: 18px; }
-.pc-kicker { font-size: 12px; font-weight: 800; letter-spacing: 3px; color: #A7B5C8; }
-.pc-hero-value { font-size: 76px; font-weight: 900; letter-spacing: -2px; color: #FFFEFB; }
+.pc-kicker { font-size: 11px; font-weight: 800; letter-spacing: 3px; color: #A7B5C8; }
+.pc-hero-free { font-size: 17px; font-weight: 700; }
+.pc-hero-value { font-size: 46px; font-weight: 900; letter-spacing: -1px; color: #FFFEFB; }
 """
 _css_loaded = False
 
@@ -157,7 +158,7 @@ class ZoneBar(Gtk.DrawingArea):
 
     def __init__(self):
         super().__init__()
-        self.set_content_height(30); self.set_hexpand(True)
+        self.set_content_height(18); self.set_hexpand(True)
         self.zones = []          # (capacity, used, rgb)
         self.set_draw_func(self._draw)
 
@@ -166,7 +167,7 @@ class ZoneBar(Gtk.DrawingArea):
 
     def _draw(self, area, cr, w, h):
         total = sum(c for c, _, _ in self.zones) or 1
-        r = 8
+        r = 6
         cr.new_sub_path()
         cr.arc(r, r, r, math.pi, 1.5 * math.pi); cr.arc(w - r, r, r, 1.5 * math.pi, 0)
         cr.arc(w - r, h - r, r, 0, 0.5 * math.pi); cr.arc(r, h - r, r, 0.5 * math.pi, math.pi)
@@ -201,8 +202,16 @@ class PCPage:
     def __init__(self, stack):
         self.stack = stack
         self.sampler = stats.Sampler()
-        self.page = Adw.PreferencesPage(); self.page.set_title("PC")
-        self.page.set_icon_name("computer-symbolic")
+        # Two columns: everything about RAM on the left (the star), CPU and network on the right.
+        self.page = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        clamp = Adw.Clamp(maximum_size=1500, tightening_threshold=1200)
+        columns = Gtk.Box(spacing=28, homogeneous=True)
+        columns.set_margin_top(24); columns.set_margin_bottom(24); columns.set_margin_start(24); columns.set_margin_end(24)
+        self.left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        self.right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        columns.append(self.left); columns.append(self.right)
+        clamp.set_child(columns); self.page.set_child(clamp)
+        self.column = self.left
         load_css()
         self.status = None
         self._loading = False
@@ -213,7 +222,7 @@ class PCPage:
 
     def _group(self, title, description=""):
         g = Adw.PreferencesGroup(title=title, description=description)
-        self.page.add(g); return g
+        self.column.append(g); return g
 
     def _build(self):
         g = self._group("")
@@ -222,17 +231,17 @@ class PCPage:
         for side in ("top", "bottom", "start", "end"):
             getattr(hero, f"set_margin_{side}")(0)
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        inner.set_margin_top(22); inner.set_margin_bottom(22); inner.set_margin_start(26); inner.set_margin_end(26)
+        inner.set_margin_top(14); inner.set_margin_bottom(14); inner.set_margin_start(18); inner.set_margin_end(18)
         kicker = Gtk.Label(label="EFFECTIVE RAM", xalign=0); kicker.add_css_class("pc-kicker")
-        top = Gtk.Box(spacing=18)
+        top = Gtk.Box(spacing=14)
         self.hero_value = Gtk.Label(xalign=0); self.hero_value.add_css_class("pc-hero-value")
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, spacing=2)
-        self.hero_free = Gtk.Label(xalign=0); self.hero_free.add_css_class("title-2")
+        self.hero_free = Gtk.Label(xalign=0); self.hero_free.add_css_class("pc-hero-free")
         self.hero_mult = Gtk.Label(xalign=0); self.hero_mult.add_css_class("dim-label")
         side.append(self.hero_free); side.append(self.hero_mult)
         top.append(self.hero_value); top.append(side)
         self.zones = ZoneBar()
-        self.zone_caption = Gtk.Box(spacing=22)
+        self.zone_caption = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=3, column_spacing=14, row_spacing=2)
         self.zone_labels = []
         for rgb, name in ((FAST_C, "Full speed RAM"), (ZRAM_C, "Compressed RAM"), (DISK_C, "SSD swap")):
             box = Gtk.Box(spacing=6); box.append(swatch(rgb)); label = Gtk.Label(xalign=0)
@@ -257,8 +266,8 @@ class PCPage:
             row, label = value_row(title, sub, rgb); self.rows[key] = label; g.add(row)
 
         g = self._group("Memory and Swap History")
-        self.mem_graph = Graph(fill_first=False); g.add(self.mem_graph)
-        legend = Gtk.Box(spacing=18); legend.set_margin_top(6)
+        self.mem_graph = Graph(height=140, fill_first=False); g.add(self.mem_graph)
+        legend = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=2, column_spacing=14, row_spacing=2); legend.set_margin_top(6)
         self.mem_legend = {}
         for key, name, rgb in (("ram", "RAM", RAM_C), ("zram", "zram", ZRAM_C), ("swap", "All swap", SWAP_C), ("effective", "Effective", EFF_C)):
             box = Gtk.Box(spacing=6); box.append(swatch(rgb))
@@ -277,11 +286,12 @@ class PCPage:
         self.swap_group = self._group("Swap Areas", "Used in priority order, highest first")
         self.swap_rows = {}
 
+        self.column = self.right
         g = self._group("CPU History")
-        self.cpu_graph = Graph(height=170); g.add(self.cpu_graph)
+        self.cpu_graph = Graph(height=230); g.add(self.cpu_graph)
         n = len(self.sampler.cpu) - 1
         self.core_colors = core_colors(n)
-        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=8, min_children_per_line=4)
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=4, min_children_per_line=2)
         flow.set_margin_top(6); flow.set_column_spacing(12); flow.set_row_spacing(4)
         self.core_labels = []
         for i in range(n):

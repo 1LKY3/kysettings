@@ -21,7 +21,7 @@ import ky_desktop
 import ky_pc_page
 from datetime import datetime, timedelta
 
-__version__ = "0.4.8"
+__version__ = "0.4.9"
 UPDATE_MANIFEST_URL = "https://kysettings.dustforge.com/latest.json"
 
 
@@ -597,6 +597,13 @@ class KySettings(Adw.Application):
         self.win.set_content(box)
         self._wire_desktop_refresh()
         self.win.connect("notify::is-active", self._queue_desktop_refresh)
+        # Open on a given tab (KYSETTINGS_PAGE=pc), maximized if asked; used when
+        # relaunching after an update so the window comes back where it was.
+        page = os.environ.get("KYSETTINGS_PAGE")
+        if page and self.stack.get_child_by_name(page):
+            self.stack.set_visible_child_name(page)
+        if os.environ.get("KYSETTINGS_MAXIMIZED") == "1":
+            self.win.maximize()
         self.win.present()
         self._refresh_desktop_status()
 
