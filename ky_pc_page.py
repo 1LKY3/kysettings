@@ -3,6 +3,7 @@ drawn in the style of Ubuntu's System Monitor resources view."""
 import colorsys
 import math
 
+import cairo
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
@@ -77,37 +78,69 @@ DISK_C = (0.36, 0.80, 0.55)
 GPU_C = (0.66, 0.55, 0.95)         # GPU usage
 VRAM_C = (0.95, 0.67, 0.30)        # video memory
 POWER_C = (0.40, 0.80, 0.82)       # power draw
+CARD_EDGE = (0.65, 0.71, 0.78, 0.35)  # hover card outline
 
 
 def core_colors(n):
     return [colorsys.hsv_to_rgb(i / max(1, n), 0.55, 0.95) for i in range(n)]
 
 
+def pct_text(v):
+    return f"{v:.0f} %"
+
+
+def watts_text(cap):
+    """Graph values are a percent of the card's power cap; the readout shows watts."""
+    return lambda v: f"{v * cap / 100:.0f} W"
+
+
+def rounded_rect(cr, x, y, w, h, r):
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
 class Graph(Gtk.DrawingArea):
-    """A scrolling one-minute line graph with a right-hand scale, like System Monitor."""
+    """A scrolling one-minute line graph with a right-hand scale, like System Monitor.
+    Hover over it for a card with every number in that moment of the graph."""
+    LEFT, RIGHT, TOP, BOTTOM = 4, 62, 6, 18      # room for the scale on the right and the seconds below
 
     def __init__(self, height=150, percent=True, fill_first=False):
         super().__init__()
         self.set_content_height(height); self.set_hexpand(True)
-        self.series = []          # (values, rgb, width)
+        self.series = []          # (values, rgb, width, name, text for one value)
         self.percent = percent
         self.fill_first = fill_first
+        self.pointer = None       # (x, y) while the mouse is over the graph
         self.set_draw_func(self._draw)
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", self._on_motion)
+        motion.connect("leave", self._on_leave)
+        self.add_controller(motion)
 
     def set_series(self, series):
         self.series = series; self.queue_draw()
 
+    def _on_motion(self, controller, x, y):
+        self.pointer = (x, y); self.queue_draw()
+
+    def _on_leave(self, controller):
+        self.pointer = None; self.queue_draw()
+
     def _scale_max(self):
         if self.percent:
             return 100.0
-        peak = max((max(x for x in v if x is not None) for v, _, _ in self.series if any(x is not None for x in v)), default=0)
+        peak = max((max(x for x in v if x is not None) for v, *_ in self.series if any(x is not None for x in v)), default=0)
         top = 1024.0
         while top < peak:
             top *= 2
         return top
 
     def _draw(self, area, cr, w, h):
-        left, right, top, bottom = 4, 62, 6, 18
+        left, right, top, bottom = self.LEFT, self.RIGHT, self.TOP, self.BOTTOM
         gw, gh = max(1, w - left - right), max(1, h - top - bottom)
         cr.set_source_rgba(0.05, 0.07, 0.11, 0.55)
         cr.rectangle(left, top, gw, gh); cr.fill()
@@ -126,7 +159,7 @@ class Graph(Gtk.DrawingArea):
         for i, label in enumerate(("60 secs", "50", "40", "30", "20", "10", "")):
             if label:
                 cr.set_source_rgba(*AXIS); cr.move_to(left + gw * i / 6 + 2, top + gh + 13); cr.show_text(label)
-        for index, (values, rgb, width) in enumerate(self.series):
+        for index, (values, rgb, width, _name, _text) in enumerate(self.series):
             n = len(values)
             pts = [(left + gw * k / (n - 1), top + gh * (1 - min(ymax, max(0, v)) / ymax)) for k, v in enumerate(values) if v is not None]
             if len(pts) < 2:
@@ -141,6 +174,69 @@ class Graph(Gtk.DrawingArea):
                 cr.set_source_rgba(*rgb, 0.18); cr.fill()
             else:
                 cr.stroke()
+        if self.pointer and self.series:
+            self._draw_readout(cr, w, h, ymax)
+
+    def _draw_readout(self, cr, w, h, ymax):
+        """The slice under the pointer: a line across the graph, a dot on each line, and a card with every number in it."""
+        left, top = self.LEFT, self.TOP
+        gw, gh = max(1, w - left - self.RIGHT), max(1, h - top - self.BOTTOM)
+        px, py = self.pointer
+        if not left <= px <= left + gw:
+            return
+        n = len(self.series[0][0])
+        k = min(n - 1, max(0, round((px - left) / gw * (n - 1))))   # snap to the sample under the pointer
+        x = left + gw * k / (n - 1)
+        cr.set_source_rgba(1, 1, 1, 0.35); cr.set_line_width(1)
+        cr.move_to(x + 0.5, top); cr.line_to(x + 0.5, top + gh); cr.stroke()
+        rows = []
+        for values, rgb, _width, name, text in self.series:
+            v = values[k]
+            if v is None:
+                rows.append((rgb, name, "n/a")); continue
+            cr.new_sub_path(); cr.set_source_rgb(*rgb)
+            cr.arc(x, top + gh * (1 - min(ymax, max(0, v)) / ymax), 3.2, 0, 2 * math.pi); cr.fill()
+            rows.append((rgb, name, text(v)))
+
+        pad, line_h, head_h, gap = 8, 16, 20, 14
+        per_col = max(1, int((gh - head_h - 2 * pad) // line_h))
+        cols = [rows[i:i + per_col] for i in range(0, len(rows), per_col)]
+        head = "Now" if k == n - 1 else f"{n - 1 - k} secs ago"
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD); cr.set_font_size(11)
+        card_w = cr.text_extents(head).x_advance + 2 * pad
+        col_w = []
+        for col in cols:
+            name_w = max(cr.text_extents(name).x_advance for _, name, _ in col)
+            value_w = max(cr.text_extents(text).x_advance for _, _, text in col)
+            col_w.append(13 + name_w + 18 + value_w)
+        card_w = max(card_w, 2 * pad + sum(col_w) + gap * (len(cols) - 1))
+        card_h = 2 * pad + head_h + min(per_col, len(rows)) * line_h
+
+        cx = px + 16
+        if cx + card_w > w - 2:          # near the right edge: open to the left of the pointer
+            cx = px - 16 - card_w
+        cx = min(max(2, cx), w - card_w - 2)
+        cy = py + 12
+        if cy + card_h > h - 2:          # near the bottom: open above the pointer
+            cy = py - 12 - card_h
+        cy = min(max(2, cy), h - card_h - 2)
+
+        rounded_rect(cr, cx, cy, card_w, card_h, 8)
+        cr.set_source_rgba(0.06, 0.08, 0.12, 0.94); cr.fill_preserve()
+        cr.set_source_rgba(*CARD_EDGE); cr.set_line_width(1); cr.stroke()
+        cr.set_source_rgba(1, 0.99, 0.97, 0.9)
+        cr.move_to(cx + pad, cy + pad + 11); cr.show_text(head)
+
+        cr.select_font_face("Sans")
+        for c, col in enumerate(cols):
+            x0 = cx + pad + sum(col_w[:c]) + gap * c
+            for r, (rgb, name, text) in enumerate(col):
+                base = cy + pad + head_h + (r + 1) * line_h - 4
+                cr.new_sub_path(); cr.set_source_rgb(*rgb)
+                cr.arc(x0 + 4, base - 4, 3.5, 0, 2 * math.pi); cr.fill()
+                cr.set_source_rgba(*AXIS); cr.move_to(x0 + 13, base); cr.show_text(name)
+                cr.set_source_rgba(1, 1, 1, 0.95)
+                cr.move_to(x0 + col_w[c] - cr.text_extents(text).x_advance, base); cr.show_text(text)
 
 
 class MemoryBar(Gtk.DrawingArea):
@@ -505,7 +601,8 @@ class PCPage:
 
     def _tick_gpu(self, g):
         n = self.sampler.gpu
-        self.gpu_graph.set_series([(n["busy"], GPU_C, 2), (n["vram"], VRAM_C, 2), (n["power"], POWER_C, 1.5)])
+        self.gpu_graph.set_series([(n["busy"], GPU_C, 2, "Usage", pct_text), (n["vram"], VRAM_C, 2, "Video memory", pct_text),
+                                   (n["power"], POWER_C, 1.5, "Power", watts_text(g["power_cap"] or 0))])
         vt = g["vram_total"] or 0
         values = {"busy": f"{g['busy']:.0f} %" if g["busy"] is not None else "n/a",
                   "vram": f"{stats.gb(g['vram_used'])} of {stats.gb(vt)}" if vt else "n/a",
@@ -749,7 +846,8 @@ class PCPage:
                 f"{stats.gb(need)} is on the SSD; brings it back for full speed" if fits else
                 f"{stats.gb(need)} is on the SSD, but there isn't enough free RAM to bring it back yet")
         m = self.sampler.mem
-        self.mem_graph.set_series([(m["ram"], RAM_C, 2), (m["zram"], ZRAM_C, 2), (m["swap"], SWAP_C, 2), (m["effective"], EFF_C, 1.5)])
+        self.mem_graph.set_series([(m["ram"], RAM_C, 2, "RAM", pct_text), (m["zram"], ZRAM_C, 2, "zram", pct_text),
+                                   (m["swap"], SWAP_C, 2, "All swap", pct_text), (m["effective"], EFF_C, 1.5, "Effective", pct_text)])
         values = {"ram": f"{stats.gb(e['ram_used'])} of {stats.gb(e['ram_total'])}",
                   "zram": f"{stats.gb(e['zram_data'])} of {stats.gb(e['zram_size'], 0)}",
                   "swap": f"{stats.gb(e['swap_used'])} of {stats.gb(e['swap_total'], 0)}",
@@ -779,8 +877,8 @@ class PCPage:
             if name not in seen:
                 self.swap_group.remove(self.swap_rows.pop(name)[0])
         cores = self.sampler.cpu[1:]
-        self.cpu_graph.set_series([(cores[i], self.core_colors[i], 1.3) for i in range(len(cores))]
-                                  + [(self.sampler.cpu[0], (1, 1, 1), 2.2)])
+        self.cpu_graph.set_series([(cores[i], self.core_colors[i], 1.3, f"CPU{i + 1}", pct_text) for i in range(len(cores))]
+                                  + [(self.sampler.cpu[0], (1, 1, 1), 2.2, "Total", pct_text)])
         for i, label in enumerate(self.core_labels):
             label.set_label(f"CPU{i + 1}  {d['cpu'][i + 1]:.0f} %")
         self.cpu_rows["total"].set_label(f"{d['cpu'][0]:.0f} %")
@@ -789,7 +887,7 @@ class PCPage:
         if d.get("gpu") and self.sampler.gpu_dev:
             self._tick_gpu(d["gpu"])
         n = self.sampler.net
-        self.net_graph.set_series([(n["rx"], RX_C, 2), (n["tx"], TX_C, 2)])
+        self.net_graph.set_series([(n["rx"], RX_C, 2, "Receiving", stats.rate), (n["tx"], TX_C, 2, "Sending", stats.rate)])
         self.net_rows["rx"][1].set_label(stats.rate(d["rx"]))
         self.net_rows["rx"][0].set_subtitle(f"Total since boot {stats.gb(d['rx_total'])}")
         self.net_rows["tx"][1].set_label(stats.rate(d["tx"]))
