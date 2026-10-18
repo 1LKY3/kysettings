@@ -109,7 +109,7 @@ export default class DashMinimizeExtension extends Extension {
     }
 
     _addMinimizeItem(menu) {
-        const source = menu._source;
+        const source = menu.sourceActor;
         const windows = minimizableWindows(source);
         if (!windows.length)
             return;
