@@ -17,7 +17,7 @@ import ky_stats as stats
 
 PC_CSS = b"""
 .pc-hero { border-radius: 18px; }  /* grain and gradient come from the KySettings theme */
-.pc-kicker { font-size: 11px; font-weight: 800; letter-spacing: 3px; color: #A9BCB6; }
+.pc-kicker { font-size: 11px; font-weight: 800; letter-spacing: 3px; color: #E8B877; }
 .pc-hero-free { font-size: 17px; font-weight: 700; }
 .pc-hero-value { font-size: 46px; font-weight: 900; letter-spacing: -1px; color: #F1EDE4; }
 """
@@ -63,22 +63,22 @@ def eagerness_text(n):
 
 
 # Palette pulled from the KySettings theme (Mount Fuji dusk wallpaper).
-GRID = (0.66, 0.74, 0.71, 0.16)
+GRID = (0.72, 0.76, 0.80, 0.16)
 AXIS = (0.91, 0.90, 0.86, 0.55)
 RAM_C = (0.87, 0.36, 0.36)        # red, like System Monitor's memory line
 SWAP_C = (0.36, 0.80, 0.55)       # green, like its swap line
 ZRAM_C = (0.89, 0.76, 0.56)       # warm sand
-EFF_C = (0.66, 0.74, 0.71)        # accent slate teal
+EFF_C = (0.91, 0.72, 0.47)        # accent amber, the town lights
 RX_C = (0.38, 0.62, 0.92)
 TX_C = (0.93, 0.47, 0.36)
-CACHE_C = (0.48, 0.56, 0.54)
-FREE_C = (0.30, 0.36, 0.35)
+CACHE_C = (0.49, 0.54, 0.59)
+FREE_C = (0.30, 0.34, 0.38)
 FAST_C = (0.56, 0.66, 0.86)        # full-speed RAM zone
 DISK_C = (0.36, 0.80, 0.55)
 GPU_C = (0.66, 0.55, 0.95)         # GPU usage
 VRAM_C = (0.95, 0.67, 0.30)        # video memory
 POWER_C = (0.40, 0.80, 0.82)       # power draw
-CARD_EDGE = (0.66, 0.74, 0.71, 0.35)  # hover card outline
+CARD_EDGE = (0.72, 0.76, 0.80, 0.35)  # hover card outline
 
 
 def core_colors(n):
@@ -142,7 +142,7 @@ class Graph(Gtk.DrawingArea):
     def _draw(self, area, cr, w, h):
         left, right, top, bottom = self.LEFT, self.RIGHT, self.TOP, self.BOTTOM
         gw, gh = max(1, w - left - right), max(1, h - top - bottom)
-        cr.set_source_rgba(0.07, 0.09, 0.085, 0.55)
+        cr.set_source_rgba(0.08, 0.09, 0.11, 0.55)
         cr.rectangle(left, top, gw, gh); cr.fill()
         ymax = self._scale_max()
         cr.set_line_width(1)
@@ -222,7 +222,7 @@ class Graph(Gtk.DrawingArea):
         cy = min(max(2, cy), h - card_h - 2)
 
         rounded_rect(cr, cx, cy, card_w, card_h, 8)
-        cr.set_source_rgba(0.08, 0.10, 0.095, 0.94); cr.fill_preserve()
+        cr.set_source_rgba(0.09, 0.11, 0.13, 0.94); cr.fill_preserve()
         cr.set_source_rgba(*CARD_EDGE); cr.set_line_width(1); cr.stroke()
         cr.set_source_rgba(1, 0.99, 0.97, 0.9)
         cr.move_to(cx + pad, cy + pad + 11); cr.show_text(head)
@@ -289,7 +289,7 @@ class ZoneBar(Gtk.DrawingArea):
             cr.set_source_rgba(*rgb, 0.22); cr.rectangle(x, 0, width, h); cr.fill()
             fill = width * min(1.0, used / capacity) if capacity else 0
             cr.set_source_rgb(*rgb); cr.rectangle(x, 0, fill, h); cr.fill()
-            cr.set_source_rgba(0.07, 0.09, 0.085, 0.9); cr.rectangle(x + width - 1, 0, 2, h); cr.fill()
+            cr.set_source_rgba(0.08, 0.09, 0.11, 0.9); cr.rectangle(x + width - 1, 0, 2, h); cr.fill()
             x += width
 
 

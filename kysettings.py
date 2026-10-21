@@ -446,36 +446,36 @@ def save_window_state(win):
 # This provider is process-local: it themes KySettings without changing other
 # GTK applications or replacing Ky's system-wide Yaru configuration.
 MOUNTAIN_CSS = b"""
-@define-color accent_color #A9BCB6;
-@define-color accent_bg_color #5C6E69;
-@define-color accent_fg_color #F1EDE4;
-@define-color destructive_color #E09A84;
-@define-color destructive_bg_color #8C5143;
+@define-color accent_color #E8B877;
+@define-color accent_bg_color #B07A3E;
+@define-color accent_fg_color #1C1A16;
+@define-color destructive_color #E8906A;
+@define-color destructive_bg_color #A4533A;
 @define-color destructive_fg_color #F1EDE4;
-@define-color success_color #A6BFA2;
-@define-color success_bg_color #56705A;
+@define-color success_color #9FB8A3;
+@define-color success_bg_color #56705C;
 @define-color success_fg_color #F1EDE4;
-@define-color warning_color #D9B57E;
-@define-color warning_bg_color #7D6443;
+@define-color warning_color #F0C88F;
+@define-color warning_bg_color #8C6244;
 @define-color warning_fg_color #F1EDE4;
-@define-color error_color #E09A84;
-@define-color error_bg_color #8C5143;
+@define-color error_color #E8906A;
+@define-color error_bg_color #A4533A;
 @define-color error_fg_color #F1EDE4;
-@define-color window_bg_color #1B201F;
+@define-color window_bg_color #1E2328;
 @define-color window_fg_color #E9E5DC;
-@define-color view_bg_color #202625;
+@define-color view_bg_color #232930;
 @define-color view_fg_color #E9E5DC;
-@define-color headerbar_bg_color #252C2B;
+@define-color headerbar_bg_color #353D45;
 @define-color headerbar_fg_color #E9E5DC;
-@define-color headerbar_border_color #3C4644;
-@define-color headerbar_backdrop_color #202625;
+@define-color headerbar_border_color #4C5660;
+@define-color headerbar_backdrop_color #2A3138;
 @define-color headerbar_shade_color rgba(10, 13, 12, 0.6);
-@define-color card_bg_color #2A3231;
+@define-color card_bg_color #2E363E;
 @define-color card_fg_color #E9E5DC;
 @define-color card_shade_color rgba(10, 13, 12, 0.5);
-@define-color dialog_bg_color #232A29;
+@define-color dialog_bg_color #272E35;
 @define-color dialog_fg_color #E9E5DC;
-@define-color popover_bg_color #2A3231;
+@define-color popover_bg_color #2E363E;
 @define-color popover_fg_color #E9E5DC;
 @define-color shade_color rgba(10, 13, 12, 0.55);
 @define-color scrollbar_outline_color rgba(10, 13, 12, 0.7);
@@ -484,9 +484,13 @@ MOUNTAIN_CSS = b"""
    warm off-white snow, amber town lights. Grain is the photo's own grain,
    lifted from the dark water into a tile at the same strength. */
 window.mountain-theme {
-    background-color: #1B201F;
+    background-color: #1E2328;
+    /* The photo top to bottom: pale blue-gray sky, the mountain's blue-gray,
+       a brown band where the trees meet its base, then the near-black
+       wind-swept water. */
     background-image: url("@GRAIN@"),
-        linear-gradient(to bottom, #2B3433 0%, #1F2524 45%, #181C1B 100%);
+        linear-gradient(to bottom, #48525B 0%, #333B43 22%, #272D34 48%,
+                        #2B2A28 64%, #1B1F24 82%, #15181C 100%);
     background-size: 256px 256px, 100% 100%;
     background-repeat: repeat, no-repeat;
     color: #E9E5DC;
@@ -494,11 +498,11 @@ window.mountain-theme {
 
 window.mountain-theme headerbar.mountain-header {
     background-image: url("@GRAIN@"),
-        linear-gradient(to bottom, #36403F, #283030);
+        linear-gradient(to bottom, #5A646D, #48525B);
     background-size: 256px 256px, 100% 100%;
     background-repeat: repeat, no-repeat;
-    color: #E9E5DC;
-    border-bottom: 1px solid #3C4644;
+    color: #F1F0EB;
+    border-bottom: 1px solid #4C5660;
     box-shadow: none;
 }
 
@@ -512,13 +516,30 @@ window.mountain-theme viewport {
 
 window.mountain-theme .boxed-list,
 window.mountain-theme .card {
-    /* see-through so the window grain shows; no second grain layer */
-    background-color: alpha(#323B3A, 0.78);
-    border: 1px solid alpha(#9DB0AA, 0.10);
+    /* see-through so the window grain shows; no second grain layer.
+       Tinted like the soft light on the water. */
+    background-color: alpha(#2A3139, 0.74);
+    border: 1px solid alpha(#C9D2DA, 0.09);
+}
+
+/* GNOME fades the whole top bar to half strength while another window has
+   focus, which made the tabs look disabled. Keep them at full strength. */
+window.mountain-theme headerbar:backdrop > windowhandle {
+    filter: none;
+}
+window.mountain-theme viewswitcher button {
+    color: #F1F0EB;
+}
+window.mountain-theme viewswitcher button:hover {
+    background-color: alpha(#F1F0EB, 0.08);
+}
+window.mountain-theme viewswitcher button:checked {
+    color: #F6D4AB;
+    background-color: alpha(#E8B877, 0.16);
 }
 
 window.mountain-theme .pc-hero {
-    background-image: linear-gradient(135deg, rgba(92, 110, 105, 0.55), rgba(42, 50, 49, 0.85));
+    background-image: linear-gradient(135deg, rgba(90, 100, 109, 0.55), rgba(39, 45, 52, 0.85));
     background-size: 100% 100%;
 }
 
@@ -530,7 +551,7 @@ window.mountain-theme row {
 }
 
 window.mountain-theme row:hover {
-    background-color: alpha(#A9BCB6, 0.07);
+    background-color: alpha(#E8B877, 0.06);
 }
 
 window.mountain-theme .dim-label,
@@ -539,23 +560,28 @@ window.mountain-theme row .subtitle {
 }
 
 window.mountain-theme button {
-    border-color: alpha(#7D918C, 0.6);
+    border-color: alpha(#9A8B74, 0.55);
 }
 
 window.mountain-theme button:hover {
-    background-color: alpha(#7D918C, 0.28);
+    background-color: alpha(#9A8B74, 0.26);
 }
 
+/* Switches and sliders light up like the town lights. */
 window.mountain-theme switch:checked,
 window.mountain-theme scale highlight,
 window.mountain-theme progressbar progress {
-    background-color: #6F837E;
+    background-color: #D9A05C;
+}
+
+window.mountain-theme switch:checked slider {
+    background-color: #F6D4AB;
 }
 
 window.mountain-theme selection,
 window.mountain-theme *:selected {
-    background-color: #5C6E69;
-    color: #F1EDE4;
+    background-color: #8C6244;
+    color: #F6EEE2;
 }
 """
 
