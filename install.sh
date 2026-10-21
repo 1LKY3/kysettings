@@ -59,6 +59,7 @@ cp scripts/ky-terminal ~/.local/bin/ky-terminal
 chmod +x ~/.local/bin/ky-terminal
 mkdir -p ~/.local/share/kysettings
 cp nautilus/ky-terminal.py ~/.local/share/kysettings/ky-terminal-nautilus.py
+cp theme/grain.png ~/.local/share/kysettings/grain.png
 
 # Install the Copy Path Files extension. It stays inert until the Display
 # page toggle creates ~/.config/kysettings/copy-path.enabled, so the switch

@@ -481,12 +481,13 @@ MOUNTAIN_CSS = b"""
 @define-color scrollbar_outline_color rgba(10, 13, 12, 0.7);
 
 /* Palette from the Mount Fuji dusk wallpaper: faded blacks, slate teal sky,
-   warm off-white snow, amber town lights. Grain is a tiled noise texture. */
+   warm off-white snow, amber town lights. Grain is the photo's own grain,
+   lifted from the dark water into a tile at the same strength. */
 window.mountain-theme {
     background-color: #1B201F;
     background-image: url("@GRAIN@"),
         linear-gradient(to bottom, #2B3433 0%, #1F2524 45%, #181C1B 100%);
-    background-size: 160px 160px, 100% 100%;
+    background-size: 256px 256px, 100% 100%;
     background-repeat: repeat, no-repeat;
     color: #E9E5DC;
 }
@@ -494,7 +495,7 @@ window.mountain-theme {
 window.mountain-theme headerbar.mountain-header {
     background-image: url("@GRAIN@"),
         linear-gradient(to bottom, #36403F, #283030);
-    background-size: 160px 160px, 100% 100%;
+    background-size: 256px 256px, 100% 100%;
     background-repeat: repeat, no-repeat;
     color: #E9E5DC;
     border-bottom: 1px solid #3C4644;
@@ -511,17 +512,14 @@ window.mountain-theme viewport {
 
 window.mountain-theme .boxed-list,
 window.mountain-theme .card {
+    /* see-through so the window grain shows; no second grain layer */
     background-color: alpha(#323B3A, 0.78);
-    background-image: url("@GRAIN@");
-    background-size: 160px 160px;
     border: 1px solid alpha(#9DB0AA, 0.10);
 }
 
 window.mountain-theme .pc-hero {
-    background-image: url("@GRAIN@"),
-        linear-gradient(135deg, rgba(92, 110, 105, 0.55), rgba(42, 50, 49, 0.95));
-    background-size: 160px 160px, 100% 100%;
-    background-repeat: repeat, no-repeat;
+    background-image: linear-gradient(135deg, rgba(92, 110, 105, 0.55), rgba(42, 50, 49, 0.85));
+    background-size: 100% 100%;
 }
 
 window.mountain-theme actionrow,
@@ -562,30 +560,13 @@ window.mountain-theme *:selected {
 """
 
 def grain_texture_path():
-    """Tileable film-grain PNG (light and dark specks, low alpha), made once and cached."""
-    import random, struct, zlib
-    path = pathlib.Path.home() / ".cache" / "kysettings" / "grain-v1.png"
-    if path.exists():
-        return path
-    size = 160
-    rng = random.Random(1987)
-    rows = bytearray()
-    for _ in range(size):
-        rows.append(0)  # PNG filter: none
-        for _ in range(size):
-            v = 255 if rng.random() < 0.5 else 0
-            a = int(abs(rng.gauss(0, 1)) * 11)
-            rows += bytes((v, min(a, 40)))
-    def chunk(kind, data):
-        return (struct.pack(">I", len(data)) + kind + data +
-                struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
-    png = (b"\x89PNG\r\n\x1a\n" +
-           chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 4, 0, 0, 0)) +
-           chunk(b"IDAT", zlib.compress(bytes(rows), 9)) + chunk(b"IEND", b""))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(png)
-    return path
-
+    """The film-grain tile lifted from the wallpaper photo (tools/make_grain.py)."""
+    here = pathlib.Path(os.path.realpath(__file__)).parent
+    for path in (pathlib.Path.home() / ".local/share/kysettings/grain.png",
+                 here / "theme" / "grain.png"):
+        if path.exists():
+            return path
+    return None
 
 # Custom keybinding paths
 KEYBINDING_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings"
@@ -685,8 +666,10 @@ class KySettings(Adw.Application):
         if getattr(self, "mountain_css", None) is not None:
             return
         self.mountain_css = Gtk.CssProvider()
-        grain = grain_texture_path().as_uri().encode()
-        self.mountain_css.load_from_data(MOUNTAIN_CSS.replace(b"@GRAIN@", grain))
+        grain = grain_texture_path()
+        css = (MOUNTAIN_CSS.replace(b"@GRAIN@", grain.as_uri().encode()) if grain
+               else MOUNTAIN_CSS.replace(b'url("@GRAIN@")', b"none"))
+        self.mountain_css.load_from_data(css)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(),
             self.mountain_css,
