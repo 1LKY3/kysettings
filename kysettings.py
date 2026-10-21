@@ -1269,6 +1269,7 @@ class KySettings(Adw.Application):
         page.add(files_group)
 
         self.stack.add_titled(page, "display", "Display")
+        self.stack.get_page(page).set_icon_name("video-display-symbolic")
 
     def is_pinned_to_dash(self):
         """Check if app is in GNOME favorites."""
@@ -1414,10 +1415,12 @@ class KySettings(Adw.Application):
             for child in children:
                 self.stack.remove(child)
             self.stack.add_titled(pc, "pc", "PC")
+            self.stack.get_page(pc).set_icon_name("power-profile-performance-symbolic")
             for build in [self.add_display_page, self.add_effects_page, self.add_wireless_page,
                           self.add_keyboard_page]:
                 build()
             self.stack.add_titled(timers, "timers", "Timers")
+            self.stack.get_page(timers).set_icon_name("alarm-symbolic")
             self.add_privacy_page()
             self.stack.set_visible_child_name(visible)
             self._wire_desktop_refresh()
@@ -1853,6 +1856,7 @@ class KySettings(Adw.Application):
         page.add(panel_group)
 
         self.stack.add_titled(page, "effects", "Effects")
+        self.stack.get_page(page).set_icon_name("preferences-other-symbolic")
 
     # ── Blur my Shell helpers ─────────────────────────────────────────────────
 
@@ -2002,6 +2006,7 @@ class KySettings(Adw.Application):
 
         page.add(pda_group)
         self.stack.add_titled(page, "wireless", "Wireless")
+        self.stack.get_page(page).set_icon_name("network-wireless-symbolic")
 
     def is_bluetooth_powered(self):
         """Check if Bluetooth adapter is powered on."""
@@ -2404,6 +2409,7 @@ class KySettings(Adw.Application):
         page.add(stt_group)
 
         self.stack.add_titled(page, "keyboard", "Keyboard")
+        self.stack.get_page(page).set_icon_name("input-keyboard-symbolic")
 
     def _keychron_super_helper(self):
         local = pathlib.Path(__file__).resolve().parent / "scripts" / "keychron-super"
@@ -2596,6 +2602,7 @@ class KySettings(Adw.Application):
         page.add(stopwatch_group)
 
         self.stack.add_titled(page, "timers", "Timers")
+        self.stack.get_page(page).set_icon_name("alarm-symbolic")
 
     # === ALARM FUNCTIONS ===
     def on_alarm_toggle(self, button):
@@ -2883,12 +2890,11 @@ class KySettings(Adw.Application):
         """Live CPU, effective memory (RAM + zram + swap) and network graphs."""
         self.pc_page = ky_pc_page.PCPage(self.stack)
         self.stack.add_titled(self.pc_page.page, "pc", "PC")
-        self.stack.get_page(self.pc_page.page).set_icon_name("computer-symbolic")
+        self.stack.get_page(self.pc_page.page).set_icon_name("power-profile-performance-symbolic")
 
     def add_privacy_page(self):
         page = Adw.PreferencesPage()
         page.set_title("Privacy")
-        page.set_icon_name("security-high-symbolic")
 
         # Agent access group — a privacy boundary, not a display preference.
         agent_group = Adw.PreferencesGroup()
@@ -2929,6 +2935,7 @@ class KySettings(Adw.Application):
 
         page.add(cleanup_group)
         self.stack.add_titled(page, "privacy", "Privacy")
+        self.stack.get_page(page).set_icon_name("security-high-symbolic")
 
     def is_ss_cleanup_enabled(self):
         """Check if screenshot cleanup is enabled."""
