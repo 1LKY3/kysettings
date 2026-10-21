@@ -21,7 +21,7 @@ import ky_desktop
 import ky_pc_page
 from datetime import datetime, timedelta
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 UPDATE_MANIFEST_URL = "https://kysettings.dustforge.com/latest.json"
 
 
@@ -1158,6 +1158,29 @@ class KySettings(Adw.Application):
         dock_group.add(pending_row)
         self.dash_minimize_pending_row = pending_row
 
+        # Ubuntu Dock settings, bound straight to its gsettings so the
+        # switches follow changes made anywhere else too.
+        dock_schema = Gio.SettingsSchemaSource.get_default().lookup(
+            "org.gnome.shell.extensions.dash-to-dock", True)
+        if dock_schema:
+            self._dock_settings = Gio.Settings.new("org.gnome.shell.extensions.dash-to-dock")
+
+            center_row = Adw.SwitchRow()
+            center_row.set_title("Center Icons")
+            center_row.set_subtitle("Keep the dock icons in the middle of the bar")
+            self._dock_settings.bind("always-center-icons", center_row, "active",
+                                     Gio.SettingsBindFlags.DEFAULT)
+            dock_group.add(center_row)
+
+            hide_row = Adw.SwitchRow()
+            hide_row.set_title("Always Auto-Hide")
+            hide_row.set_subtitle("Hide the dock even when no window is in the way")
+            # Intellihide only hides when a window overlaps the dock; off means always hide.
+            self._dock_settings.bind("intellihide", hide_row, "active",
+                                     Gio.SettingsBindFlags.DEFAULT | Gio.SettingsBindFlags.INVERT_BOOLEAN)
+            hide_row.connect("notify::active", self.on_dock_always_hide_toggle)
+            dock_group.add(hide_row)
+
         page.add(dock_group)
 
         files_group = Adw.PreferencesGroup()
@@ -1462,6 +1485,12 @@ class KySettings(Adw.Application):
         except Exception as exc:
             print(f"Could not change extension {uuid}: {exc}")
             return False
+
+    def on_dock_always_hide_toggle(self, row, _pspec):
+        # Always-hide needs the dock's auto-hide on and the dock not pinned.
+        if row.get_active():
+            self._dock_settings.set_boolean("autohide", True)
+            self._dock_settings.set_boolean("dock-fixed", False)
 
     def _is_dash_minimize_enabled(self):
         return self._is_extension_enabled(self.DASH_MINIMIZE_UUID)
