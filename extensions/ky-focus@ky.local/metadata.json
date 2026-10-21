@@ -2,6 +2,6 @@
   "uuid": "ky-focus@ky.local",
   "name": "Ky Focus",
   "description": "Publishes the focused window's PID on the session bus so game auto-mute can see Wayland-native windows. Enabled automatically by Ky Settings > Display > Game Auto-Mute.",
-  "shell-version": ["45", "46", "47", "48"],
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
   "version": 1
 }
