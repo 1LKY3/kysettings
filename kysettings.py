@@ -446,83 +446,146 @@ def save_window_state(win):
 # This provider is process-local: it themes KySettings without changing other
 # GTK applications or replacing Ky's system-wide Yaru configuration.
 MOUNTAIN_CSS = b"""
-@define-color accent_color #A7B5C8;
-@define-color accent_bg_color #5A6679;
-@define-color accent_fg_color #FFFEFB;
-@define-color destructive_color #FF8B7B;
-@define-color destructive_bg_color #9C4F4A;
-@define-color destructive_fg_color #FFFEFB;
-@define-color success_color #A9C5AD;
-@define-color success_bg_color #55725A;
-@define-color success_fg_color #FFFEFB;
-@define-color warning_color #E2C28F;
-@define-color warning_bg_color #806B4C;
-@define-color warning_fg_color #FFFEFB;
-@define-color error_color #FF8B7B;
-@define-color error_bg_color #9C4F4A;
-@define-color error_fg_color #FFFEFB;
-@define-color window_bg_color #0C121E;
-@define-color window_fg_color #FFFDF8;
-@define-color view_bg_color #111824;
-@define-color view_fg_color #FFFDF8;
-@define-color headerbar_bg_color #191E29;
-@define-color headerbar_fg_color #FFFDF8;
-@define-color headerbar_border_color #454E5F;
-@define-color headerbar_backdrop_color #111824;
-@define-color headerbar_shade_color rgba(7, 11, 19, 0.65);
-@define-color card_bg_color #252D3B;
-@define-color card_fg_color #FFFDF8;
-@define-color card_shade_color rgba(7, 11, 19, 0.55);
-@define-color dialog_bg_color #191E29;
-@define-color dialog_fg_color #FFFDF8;
-@define-color popover_bg_color #252D3B;
-@define-color popover_fg_color #FFFDF8;
-@define-color shade_color rgba(7, 11, 19, 0.60);
-@define-color scrollbar_outline_color rgba(7, 11, 19, 0.75);
+@define-color accent_color #A9BCB6;
+@define-color accent_bg_color #5C6E69;
+@define-color accent_fg_color #F1EDE4;
+@define-color destructive_color #E09A84;
+@define-color destructive_bg_color #8C5143;
+@define-color destructive_fg_color #F1EDE4;
+@define-color success_color #A6BFA2;
+@define-color success_bg_color #56705A;
+@define-color success_fg_color #F1EDE4;
+@define-color warning_color #D9B57E;
+@define-color warning_bg_color #7D6443;
+@define-color warning_fg_color #F1EDE4;
+@define-color error_color #E09A84;
+@define-color error_bg_color #8C5143;
+@define-color error_fg_color #F1EDE4;
+@define-color window_bg_color #1B201F;
+@define-color window_fg_color #E9E5DC;
+@define-color view_bg_color #202625;
+@define-color view_fg_color #E9E5DC;
+@define-color headerbar_bg_color #252C2B;
+@define-color headerbar_fg_color #E9E5DC;
+@define-color headerbar_border_color #3C4644;
+@define-color headerbar_backdrop_color #202625;
+@define-color headerbar_shade_color rgba(10, 13, 12, 0.6);
+@define-color card_bg_color #2A3231;
+@define-color card_fg_color #E9E5DC;
+@define-color card_shade_color rgba(10, 13, 12, 0.5);
+@define-color dialog_bg_color #232A29;
+@define-color dialog_fg_color #E9E5DC;
+@define-color popover_bg_color #2A3231;
+@define-color popover_fg_color #E9E5DC;
+@define-color shade_color rgba(10, 13, 12, 0.55);
+@define-color scrollbar_outline_color rgba(10, 13, 12, 0.7);
 
+/* Palette from the Mount Fuji dusk wallpaper: faded blacks, slate teal sky,
+   warm off-white snow, amber town lights. Grain is a tiled noise texture. */
 window.mountain-theme {
-    background-color: #0C121E;
-    color: #FFFDF8;
+    background-color: #1B201F;
+    background-image: url("@GRAIN@"),
+        linear-gradient(to bottom, #2B3433 0%, #1F2524 45%, #181C1B 100%);
+    background-size: 160px 160px, 100% 100%;
+    background-repeat: repeat, no-repeat;
+    color: #E9E5DC;
 }
 
 window.mountain-theme headerbar.mountain-header {
-    background: linear-gradient(to bottom, #252D3B, #191E29);
-    color: #FFFDF8;
-    border-bottom: 1px solid #454E5F;
+    background-image: url("@GRAIN@"),
+        linear-gradient(to bottom, #36403F, #283030);
+    background-size: 160px 160px, 100% 100%;
+    background-repeat: repeat, no-repeat;
+    color: #E9E5DC;
+    border-bottom: 1px solid #3C4644;
+    box-shadow: none;
 }
 
 window.mountain-theme preferencespage,
-window.mountain-theme .mountain-content {
-    background-color: #0C121E;
-    color: #FFFDF8;
+window.mountain-theme .mountain-content,
+window.mountain-theme scrolledwindow,
+window.mountain-theme viewport {
+    background: none;
+    color: #E9E5DC;
+}
+
+window.mountain-theme .boxed-list,
+window.mountain-theme .card {
+    background-color: alpha(#323B3A, 0.78);
+    background-image: url("@GRAIN@");
+    background-size: 160px 160px;
+    border: 1px solid alpha(#9DB0AA, 0.10);
+}
+
+window.mountain-theme .pc-hero {
+    background-image: url("@GRAIN@"),
+        linear-gradient(135deg, rgba(92, 110, 105, 0.55), rgba(42, 50, 49, 0.95));
+    background-size: 160px 160px, 100% 100%;
+    background-repeat: repeat, no-repeat;
 }
 
 window.mountain-theme actionrow,
 window.mountain-theme expanderrow,
 window.mountain-theme row {
-    color: #FFFDF8;
+    color: #E9E5DC;
+    background-color: transparent;
+}
+
+window.mountain-theme row:hover {
+    background-color: alpha(#A9BCB6, 0.07);
+}
+
+window.mountain-theme .dim-label,
+window.mountain-theme row .subtitle {
+    color: alpha(#E9E5DC, 0.72);
 }
 
 window.mountain-theme button {
-    border-color: alpha(#6E7582, 0.68);
+    border-color: alpha(#7D918C, 0.6);
 }
 
 window.mountain-theme button:hover {
-    background-color: alpha(#6E7582, 0.32);
+    background-color: alpha(#7D918C, 0.28);
 }
 
 window.mountain-theme switch:checked,
 window.mountain-theme scale highlight,
 window.mountain-theme progressbar progress {
-    background-color: #6E7582;
+    background-color: #6F837E;
 }
 
 window.mountain-theme selection,
 window.mountain-theme *:selected {
-    background-color: #5A6679;
-    color: #FFFEFB;
+    background-color: #5C6E69;
+    color: #F1EDE4;
 }
 """
+
+def grain_texture_path():
+    """Tileable film-grain PNG (light and dark specks, low alpha), made once and cached."""
+    import random, struct, zlib
+    path = pathlib.Path.home() / ".cache" / "kysettings" / "grain-v1.png"
+    if path.exists():
+        return path
+    size = 160
+    rng = random.Random(1987)
+    rows = bytearray()
+    for _ in range(size):
+        rows.append(0)  # PNG filter: none
+        for _ in range(size):
+            v = 255 if rng.random() < 0.5 else 0
+            a = int(abs(rng.gauss(0, 1)) * 11)
+            rows += bytes((v, min(a, 40)))
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data +
+                struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+    png = (b"\x89PNG\r\n\x1a\n" +
+           chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 4, 0, 0, 0)) +
+           chunk(b"IDAT", zlib.compress(bytes(rows), 9)) + chunk(b"IEND", b""))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png)
+    return path
+
 
 # Custom keybinding paths
 KEYBINDING_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings"
@@ -622,7 +685,8 @@ class KySettings(Adw.Application):
         if getattr(self, "mountain_css", None) is not None:
             return
         self.mountain_css = Gtk.CssProvider()
-        self.mountain_css.load_from_data(MOUNTAIN_CSS)
+        grain = grain_texture_path().as_uri().encode()
+        self.mountain_css.load_from_data(MOUNTAIN_CSS.replace(b"@GRAIN@", grain))
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(),
             self.mountain_css,
