@@ -604,20 +604,6 @@ class KySettings(Adw.Application):
         super().__init__(application_id='com.ky.settings')
         self.connect('activate', self.on_activate)
 
-        # Timer state
-        self.stopwatch_running = False
-        self.stopwatch_start = None
-        self.stopwatch_elapsed = timedelta()
-        self.stopwatch_timer_id = None
-
-        self.countdown_running = False
-        self.countdown_remaining = timedelta()
-        self.countdown_timer_id = None
-
-        self.alarm_time = None
-        self.alarm_enabled = False
-        self.alarm_timer_id = None
-
         self._initializing = True
 
         # Screenshot cleanup loop (every hour)
@@ -652,7 +638,6 @@ class KySettings(Adw.Application):
         self.add_effects_page()
         self.add_wireless_page()
         self.add_keyboard_page()
-        self.add_timers_page()
         self.add_privacy_page()
 
         self._initializing = False
@@ -1410,7 +1395,6 @@ class KySettings(Adw.Application):
             visible = self.stack.get_visible_child_name()
             pages = self.stack.get_pages()
             children = [pages.get_item(i).get_child() for i in range(pages.get_n_items())]
-            timers = self.stack.get_child_by_name("timers")
             pc = self.stack.get_child_by_name("pc")
             for child in children:
                 self.stack.remove(child)
@@ -1419,8 +1403,6 @@ class KySettings(Adw.Application):
             for build in [self.add_display_page, self.add_effects_page, self.add_wireless_page,
                           self.add_keyboard_page]:
                 build()
-            self.stack.add_titled(timers, "timers", "Timers")
-            self.stack.get_page(timers).set_icon_name("alarm-symbolic")
             self.add_privacy_page()
             self.stack.set_visible_child_name(visible)
             self._wire_desktop_refresh()
@@ -2475,252 +2457,6 @@ class KySettings(Adw.Application):
                                   heading="Super Key Change Failed", body=message)
         dialog.add_response("ok", "OK")
         dialog.present()
-
-    def add_timers_page(self):
-        page = Adw.PreferencesPage()
-        page.set_title("Timers")
-
-        # === ALARM ===
-        alarm_group = Adw.PreferencesGroup()
-        alarm_group.set_title("Alarm")
-        alarm_group.set_description("Set an alarm for a specific time")
-
-        # Time picker row
-        alarm_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        alarm_box.set_margin_top(10)
-        alarm_box.set_margin_bottom(10)
-
-        self.alarm_hour = Gtk.SpinButton.new_with_range(0, 23, 1)
-        self.alarm_hour.set_value(datetime.now().hour)
-        self.alarm_hour.set_width_chars(2)
-
-        alarm_box.append(Gtk.Label(label="Hour:"))
-        alarm_box.append(self.alarm_hour)
-
-        self.alarm_minute = Gtk.SpinButton.new_with_range(0, 59, 1)
-        self.alarm_minute.set_value(0)
-        self.alarm_minute.set_width_chars(2)
-
-        alarm_box.append(Gtk.Label(label="Min:"))
-        alarm_box.append(self.alarm_minute)
-
-        self.alarm_toggle = Gtk.ToggleButton(label="Set Alarm")
-        self.alarm_toggle.connect("toggled", self.on_alarm_toggle)
-        alarm_box.append(self.alarm_toggle)
-
-        self.alarm_status = Gtk.Label(label="No alarm set")
-        self.alarm_status.set_hexpand(True)
-        self.alarm_status.set_halign(Gtk.Align.END)
-        alarm_box.append(self.alarm_status)
-
-        alarm_group.add(alarm_box)
-        page.add(alarm_group)
-
-        # === COUNTDOWN TIMER ===
-        countdown_group = Adw.PreferencesGroup()
-        countdown_group.set_title("Countdown Timer")
-        countdown_group.set_description("Count down from a set duration")
-
-        countdown_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        countdown_box.set_margin_top(10)
-        countdown_box.set_margin_bottom(10)
-
-        self.countdown_hours = Gtk.SpinButton.new_with_range(0, 23, 1)
-        self.countdown_hours.set_value(0)
-        self.countdown_hours.set_width_chars(2)
-        countdown_box.append(Gtk.Label(label="H:"))
-        countdown_box.append(self.countdown_hours)
-
-        self.countdown_minutes = Gtk.SpinButton.new_with_range(0, 59, 1)
-        self.countdown_minutes.set_value(5)
-        self.countdown_minutes.set_width_chars(2)
-        countdown_box.append(Gtk.Label(label="M:"))
-        countdown_box.append(self.countdown_minutes)
-
-        self.countdown_seconds = Gtk.SpinButton.new_with_range(0, 59, 1)
-        self.countdown_seconds.set_value(0)
-        self.countdown_seconds.set_width_chars(2)
-        countdown_box.append(Gtk.Label(label="S:"))
-        countdown_box.append(self.countdown_seconds)
-
-        countdown_group.add(countdown_box)
-
-        countdown_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        countdown_controls.set_margin_bottom(10)
-
-        self.countdown_start_btn = Gtk.Button(label="Start")
-        self.countdown_start_btn.connect("clicked", self.on_countdown_start)
-        countdown_controls.append(self.countdown_start_btn)
-
-        self.countdown_stop_btn = Gtk.Button(label="Stop")
-        self.countdown_stop_btn.connect("clicked", self.on_countdown_stop)
-        self.countdown_stop_btn.set_sensitive(False)
-        countdown_controls.append(self.countdown_stop_btn)
-
-        self.countdown_reset_btn = Gtk.Button(label="Reset")
-        self.countdown_reset_btn.connect("clicked", self.on_countdown_reset)
-        countdown_controls.append(self.countdown_reset_btn)
-
-        self.countdown_display = Gtk.Label(label="00:00:00")
-        self.countdown_display.add_css_class("title-1")
-        self.countdown_display.set_hexpand(True)
-        self.countdown_display.set_halign(Gtk.Align.END)
-        countdown_controls.append(self.countdown_display)
-
-        countdown_group.add(countdown_controls)
-        page.add(countdown_group)
-
-        # === STOPWATCH ===
-        stopwatch_group = Adw.PreferencesGroup()
-        stopwatch_group.set_title("Stopwatch")
-        stopwatch_group.set_description("Track elapsed time")
-
-        stopwatch_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        stopwatch_box.set_margin_top(10)
-        stopwatch_box.set_margin_bottom(10)
-
-        self.stopwatch_start_btn = Gtk.Button(label="Start")
-        self.stopwatch_start_btn.connect("clicked", self.on_stopwatch_start)
-        stopwatch_box.append(self.stopwatch_start_btn)
-
-        self.stopwatch_stop_btn = Gtk.Button(label="Stop")
-        self.stopwatch_stop_btn.connect("clicked", self.on_stopwatch_stop)
-        self.stopwatch_stop_btn.set_sensitive(False)
-        stopwatch_box.append(self.stopwatch_stop_btn)
-
-        self.stopwatch_reset_btn = Gtk.Button(label="Reset")
-        self.stopwatch_reset_btn.connect("clicked", self.on_stopwatch_reset)
-        stopwatch_box.append(self.stopwatch_reset_btn)
-
-        self.stopwatch_display = Gtk.Label(label="00:00:00.0")
-        self.stopwatch_display.add_css_class("title-1")
-        self.stopwatch_display.set_hexpand(True)
-        self.stopwatch_display.set_halign(Gtk.Align.END)
-        stopwatch_box.append(self.stopwatch_display)
-
-        stopwatch_group.add(stopwatch_box)
-        page.add(stopwatch_group)
-
-        self.stack.add_titled(page, "timers", "Timers")
-        self.stack.get_page(page).set_icon_name("alarm-symbolic")
-
-    # === ALARM FUNCTIONS ===
-    def on_alarm_toggle(self, button):
-        if button.get_active():
-            hour = int(self.alarm_hour.get_value())
-            minute = int(self.alarm_minute.get_value())
-            now = datetime.now()
-            self.alarm_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if self.alarm_time <= now:
-                self.alarm_time += timedelta(days=1)
-
-            self.alarm_enabled = True
-            self.alarm_status.set_label(f"Alarm: {self.alarm_time.strftime('%H:%M')}")
-            button.set_label("Cancel")
-            self.alarm_timer_id = GLib.timeout_add(1000, self.check_alarm)
-        else:
-            self.alarm_enabled = False
-            if self.alarm_timer_id:
-                GLib.source_remove(self.alarm_timer_id)
-                self.alarm_timer_id = None
-            self.alarm_status.set_label("No alarm set")
-            button.set_label("Set Alarm")
-
-    def check_alarm(self):
-        if not self.alarm_enabled:
-            return False
-        if datetime.now() >= self.alarm_time:
-            self.trigger_alarm()
-            self.alarm_toggle.set_active(False)
-            return False
-        return True
-
-    def trigger_alarm(self):
-        """Play alarm sound and show notification."""
-        subprocess.Popen(["pw-play", "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"])
-        subprocess.Popen(["notify-send", "-u", "critical", "Alarm", "Time's up!"])
-
-    # === COUNTDOWN FUNCTIONS ===
-    def on_countdown_start(self, button):
-        if not self.countdown_running:
-            if self.countdown_remaining.total_seconds() == 0:
-                h = int(self.countdown_hours.get_value())
-                m = int(self.countdown_minutes.get_value())
-                s = int(self.countdown_seconds.get_value())
-                self.countdown_remaining = timedelta(hours=h, minutes=m, seconds=s)
-
-            if self.countdown_remaining.total_seconds() > 0:
-                self.countdown_running = True
-                self.countdown_start_btn.set_sensitive(False)
-                self.countdown_stop_btn.set_sensitive(True)
-                self.countdown_timer_id = GLib.timeout_add(100, self.update_countdown)
-
-    def on_countdown_stop(self, button):
-        self.countdown_running = False
-        if self.countdown_timer_id:
-            GLib.source_remove(self.countdown_timer_id)
-            self.countdown_timer_id = None
-        self.countdown_start_btn.set_sensitive(True)
-        self.countdown_stop_btn.set_sensitive(False)
-
-    def on_countdown_reset(self, button):
-        self.on_countdown_stop(button)
-        self.countdown_remaining = timedelta()
-        self.countdown_display.set_label("00:00:00")
-
-    def update_countdown(self):
-        if not self.countdown_running:
-            return False
-
-        self.countdown_remaining -= timedelta(milliseconds=100)
-        if self.countdown_remaining.total_seconds() <= 0:
-            self.countdown_remaining = timedelta()
-            self.countdown_display.set_label("00:00:00")
-            self.on_countdown_stop(None)
-            self.trigger_alarm()
-            return False
-
-        total = int(self.countdown_remaining.total_seconds())
-        h, rem = divmod(total, 3600)
-        m, s = divmod(rem, 60)
-        self.countdown_display.set_label(f"{h:02d}:{m:02d}:{s:02d}")
-        return True
-
-    # === STOPWATCH FUNCTIONS ===
-    def on_stopwatch_start(self, button):
-        if not self.stopwatch_running:
-            self.stopwatch_running = True
-            self.stopwatch_start = datetime.now()
-            self.stopwatch_start_btn.set_sensitive(False)
-            self.stopwatch_stop_btn.set_sensitive(True)
-            self.stopwatch_timer_id = GLib.timeout_add(100, self.update_stopwatch)
-
-    def on_stopwatch_stop(self, button):
-        if self.stopwatch_running:
-            self.stopwatch_running = False
-            self.stopwatch_elapsed += datetime.now() - self.stopwatch_start
-            if self.stopwatch_timer_id:
-                GLib.source_remove(self.stopwatch_timer_id)
-                self.stopwatch_timer_id = None
-            self.stopwatch_start_btn.set_sensitive(True)
-            self.stopwatch_stop_btn.set_sensitive(False)
-
-    def on_stopwatch_reset(self, button):
-        self.on_stopwatch_stop(button)
-        self.stopwatch_elapsed = timedelta()
-        self.stopwatch_display.set_label("00:00:00.0")
-
-    def update_stopwatch(self):
-        if not self.stopwatch_running:
-            return False
-
-        elapsed = self.stopwatch_elapsed + (datetime.now() - self.stopwatch_start)
-        total = elapsed.total_seconds()
-        h, rem = divmod(int(total), 3600)
-        m, s = divmod(rem, 60)
-        tenths = int((total - int(total)) * 10)
-        self.stopwatch_display.set_label(f"{h:02d}:{m:02d}:{s:02d}.{tenths}")
-        return True
 
     def get_custom_keybindings(self):
         """Get list of custom keybinding paths."""

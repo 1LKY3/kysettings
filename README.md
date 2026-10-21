@@ -212,11 +212,6 @@ command line that merely mentions the script, which reported false positives).
 - Speech to Text — install Speech Note (offline, via Flatpak)
 - Speech Lock — lock dictation to a specific window. Opens a terminal, click your target window, then dictate in Speech Note (clipboard mode). Text auto-pastes into the locked window no matter what's focused. X11 only.
 
-**Timers**
-- Alarm clock
-- Countdown timer
-- Stopwatch
-
 ## CLI
 
 PDANet proxy can also be toggled from the terminal:
@@ -287,7 +282,6 @@ Opening the Keyboard page does not enable screenshot shortcuts. Effects use
 extension-local schemas when needed. Screenshot cleanup keeps its existing
 behavior: it runs while KySettings is open, deleting matching screenshots older
 than 24 hours; restoring the setting cannot recover already-deleted files.
-Timers and alarms are runtime actions and are not started by the preset.
 
 The uninstaller restores an active desktop snapshot before removing the engine.
 If restoration fails, it retains the app and recovery data for retry.
